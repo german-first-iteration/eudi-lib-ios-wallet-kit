@@ -33,16 +33,24 @@ public class OpenId4VCIService: NSObject, ASWebAuthenticationPresentationContext
 	let logger: Logger
 	let config: OpenId4VCIConfig
 	let alg = JWSAlgorithm(.ES256)
+    let authorizationService: OpenId4VciUserAuthorizationService
 	static var metadataCache = [String: CredentialOffer]()
 	var urlSession: URLSession
 	var parRequested: ParRequested?
 	
-	init(issueRequest: IssueRequest, credentialIssuerURL: String, config: OpenId4VCIConfig, urlSession: URLSession) {
+	init(
+        issueRequest: IssueRequest,
+        credentialIssuerURL: String,
+        config: OpenId4VCIConfig,
+        urlSession: URLSession,
+        authorizationService: OpenId4VciUserAuthorizationService?
+    ) {
 		self.issueReq = issueRequest
 		self.credentialIssuerURL = credentialIssuerURL
 		self.urlSession = urlSession
 		logger = Logger(label: "OpenId4VCI")
 		self.config = config
+        self.authorizationService = authorizationService ?? OpenId4VciUserAuthorizationServiceDefault(config: config)
 	}
 	
 	func initSecurityKeys(_ useSecureEnclave: Bool) throws {
@@ -235,6 +243,12 @@ public class OpenId4VCIService: NSObject, ASWebAuthenticationPresentationContext
 		if case let .success(request) = parPlaced, case let .par(parRequested) = request {
 			self.parRequested = parRequested
 			logger.info("--> [AUTHORIZATION] Placed PAR. Get authorization code URL is: \(parRequested.getAuthorizationCodeURL)")
+            
+            let authorizationResponse = try await authorizationService.getAuthorizationCode(requestURL: parRequested.getAuthorizationCodeURL.url)
+            
+            logger.info("--> [AUTHORIZATION] Authorization code retrieved")
+            
+            let unAuthorized = await issuer.handleAuthorizationCode(parRequested: request, authorizationCode: .authorizationCode(authorizationCode: authorizationResponse.authorizationCode))
             
             //return authorizationCodeURL
             return .presentation_request(parRequested.getAuthorizationCodeURL.url)

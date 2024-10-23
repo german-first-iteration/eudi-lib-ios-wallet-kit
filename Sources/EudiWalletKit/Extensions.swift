@@ -50,7 +50,12 @@ extension FileManager {
 
 extension WalletStorage.Document {
 	public var authorizePresentationUrl: String? {
-		guard status == .pending, let model = try? JSONDecoder().decode(PendingIssuanceModel.self, from: data), case .presentation_request_url(let urlString) = model.pendingReason else { return nil	}
+		guard status == .pending,
+                let model = try? JSONDecoder().decode(PendingIssuanceModel.self, from: data),
+                case .presentation_request_url(let urlString) = model.pendingReason else
+        {
+            return nil
+        }
 		return urlString
 	}
 }
