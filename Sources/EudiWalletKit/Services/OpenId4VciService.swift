@@ -267,6 +267,10 @@ public class OpenId4VCIService: NSObject, ASWebAuthenticationPresentationContext
 		}
 		throw WalletError(description: "Failed to get push authorization code request")
 	}
+    
+    public func getAccessToken(dpopNonce: String, code: String) async {
+      
+  }
 	
 	private func handleAuthorizationCode(issuer: Issuer, request: UnauthorizedRequest, authorizationCode: String) async throws -> AuthorizedRequest{
 		let unAuthorized = await issuer.handleAuthorizationCode(parRequested: request, authorizationCode: .authorizationCode(authorizationCode: authorizationCode))

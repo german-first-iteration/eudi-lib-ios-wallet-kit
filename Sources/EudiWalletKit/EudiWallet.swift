@@ -421,6 +421,11 @@ public final class EudiWallet: ObservableObject {
 			return PresentationSession(presentationService: FaultPresentationService(error: error), docIdAndTypes: [:], userAuthenticationRequired: false)
 		}
 	}
+    
+    public func getAccessToken(dpopNonce: String, code: String) async {
+        let (_, openId4VCIService, _) = try await prepareIssuing(docType: nil, displayName: nil, authorizationService: authorizationService)
+        openId4VCIService.getAccessToken(dpopNonce: dpopNonce, code: code)
+    }
 	
 	/// Begin attestation presentation to a verifier
 	/// - Parameters:
