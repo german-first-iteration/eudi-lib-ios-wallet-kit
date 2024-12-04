@@ -61,7 +61,7 @@ public class OpenId4VCIService: NSObject, ASWebAuthenticationPresentationContext
 		}
 		publicKey = try KeyController.generateECDHPublicKey(from: privateKey)
 		let publicKeyJWK = try ECPublicKey(publicKey: publicKey, additionalParameters: ["alg": alg.name, "use": "sig", "kid": UUID().uuidString])
-		bindingKey = .jwk(algorithm: alg, jwk: publicKeyJWK, privateKey: privateKey, issuer: config.clientId)
+        bindingKey = .jwk(algorithm: alg, jwk: publicKeyJWK, privateKey: privateKey, issuer: config.client.id)
 	}
     
     /// Issue a document with the given `docType` using OpenId4Vci protocol
@@ -70,13 +70,13 @@ public class OpenId4VCIService: NSObject, ASWebAuthenticationPresentationContext
     ///   - format: format of the exchanged data
     ///   - useSecureEnclave: use secure enclave to protect the private key
     /// - Returns: The data of the document
-    func issuePAR(docType: String, format: DataFormat, promptMessage: String? = nil, useSecureEnclave: Bool = true) async throws -> IssuanceOutcome {
+    func issuePAR(docType: String, format: DataFormat, promptMessage: String? = nil, useSecureEnclave: Bool = true, pop: String? = nil, wia: String? = nil) async throws -> IssuanceOutcome {
         try initSecurityKeys(useSecureEnclave)
         let res = try await issueByPARType(docType, format: format, promptMessage: promptMessage)
         return res
     }
     
-    func issueByPARType(_ docType: String, format: DataFormat, promptMessage: String? = nil, claimSet: ClaimSet? = nil) async throws -> IssuanceOutcome {
+    func issueByPARType(_ docType: String, format: DataFormat, promptMessage: String? = nil, claimSet: ClaimSet? = nil, clientAttestation: ClientAttestation? = nil) async throws -> IssuanceOutcome {
         let credentialIssuerIdentifier = try CredentialIssuerId(credentialIssuerURL)
         let issuerMetadata = await CredentialIssuerMetadataResolver(fetcher: Fetcher(session: urlSession)).resolve(source: .credentialIssuer(credentialIssuerIdentifier))
         switch issuerMetadata {
@@ -86,7 +86,7 @@ public class OpenId4VCIService: NSObject, ASWebAuthenticationPresentationContext
                 let (credentialConfigurationIdentifier, _, _) = try getCredentialIdentifier(credentialsSupported: metaData.credentialsSupported, docType: docType, format: format)
                 let offer = try CredentialOffer(credentialIssuerIdentifier: credentialIssuerIdentifier, credentialIssuerMetadata: metaData, credentialConfigurationIdentifiers: [credentialConfigurationIdentifier], grants: nil, authorizationServerMetadata: try authServerMetadata.get())
                 // Authorize with auth code flow
-                let issuer = try getIssuer(offer: offer)
+                let issuer = try getIssuer(offer: offer, clientAttestation: clientAttestation)
                 
               
                 let authorizedOutcome = (try await authorizePARWithAuthCodeUseCase(issuer: issuer, offer: offer)).1
@@ -204,10 +204,11 @@ public class OpenId4VCIService: NSObject, ASWebAuthenticationPresentationContext
 		}
 	}
 	
-    func getIssuer(offer: CredentialOffer, dpopConstructor: DPoPConstructor? = nil) throws -> Issuer {
-        try Issuer(authorizationServerMetadata: offer.authorizationServerMetadata, issuerMetadata: offer.credentialIssuerMetadata, config: config, parPoster: Poster(session: urlSession), tokenPoster: Poster(session: urlSession), requesterPoster: Poster(session: urlSession), deferredRequesterPoster: Poster(session: urlSession), notificationPoster: Poster(session: urlSession), dpopConstructor: dpopConstructor)
+    func getIssuer(offer: CredentialOffer, dpopConstructor: DPoPConstructor? = nil, clientAttestation: ClientAttestation? = nil) throws -> Issuer {
+        try Issuer(authorizationServerMetadata: offer.authorizationServerMetadata, issuerMetadata: offer.credentialIssuerMetadata, config: config, parPoster: Poster(session: urlSession), tokenPoster: Poster(session: urlSession), requesterPoster: Poster(session: urlSession), deferredRequesterPoster: Poster(session: urlSession), notificationPoster: Poster(session: urlSession), dpopConstructor: dpopConstructor, clientAttestation: clientAttestation)
 	}
-    public func getIssuerWithDpopConstructor(offer: CredentialOffer) throws -> Issuer? {
+    
+    public func getIssuerWithDpopConstructor(offer: CredentialOffer, clientAttestation: ClientAttestation? = nil) throws -> Issuer? {
         let privateKey = try? KeyController.generateECDHPrivateKey()
         if let privateKey,
            let publicKey = try? KeyController.generateECDHPublicKey(from: privateKey) {
@@ -249,7 +250,7 @@ public class OpenId4VCIService: NSObject, ASWebAuthenticationPresentationContext
         if let authorized = if let preAuthorizedCode,
                                 let txCodeValue,
                                 let authCode = try? IssuanceAuthorization(preAuthorizationCode: preAuthorizedCode, txCode: txCodeSpec) {
-            try await issuer.authorizeWithPreAuthorizationCode(credentialOffer: offer, authorizationCode: authCode, clientId: config.clientId, transactionCode: txCodeValue).get()
+            try await issuer.authorizeWithPreAuthorizationCode(credentialOffer: offer, authorizationCode: authCode, clientId: config.client.id, transactionCode: txCodeValue).get()
         } else {
             try await authorizePARWithAuthCodeUseCase(issuer: issuer, offer: offer).0
         } {
@@ -539,13 +540,13 @@ public class OpenId4VCIService: NSObject, ASWebAuthenticationPresentationContext
 #endif
 	}
     
-    public func getCredentials(dpopNonce: String, code: String, claimSet: ClaimSet? = nil) async throws -> (Data?) {
+    public func getCredentials(dpopNonce: String, code: String, claimSet: ClaimSet? = nil, clientAttestation: ClientAttestation? = nil) async throws -> (Data?) {
         do {
             try initSecurityKeys(usedSecureEnclave ?? true)
             if let key = OpenId4VCIService.metadataCache.keys.first,
                 let credential = OpenId4VCIService.metadataCache[key],
                 let unauthorizedRequest = OpenId4VCIService.parReqCache {
-                if let issuer = try getIssuerWithDpopConstructor(offer: credential) {
+                if let issuer = try getIssuerWithDpopConstructor(offer: credential, clientAttestation: clientAttestation) {
                     let authorized = try await handleAuthorizationCode(nonce: dpopNonce, issuer: issuer, request: unauthorizedRequest, authorizationCode: code)
                     
                     if let credentialConfigurationIdentifiers = credential.credentialConfigurationIdentifiers.first {

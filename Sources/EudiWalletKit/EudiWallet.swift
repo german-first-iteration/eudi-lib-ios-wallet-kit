@@ -33,6 +33,10 @@ import UIKit
 
  #endif
 
+struct DefaultClient: Client {
+    var id: String
+}
+
 /// User wallet implementation
 public final class EudiWallet: ObservableObject {
 	/// Storage manager instance
@@ -68,7 +72,7 @@ public final class EudiWallet: ObservableObject {
 	public var logFileName: String? { didSet { try? initializeLogging() } }
 	public static var defaultClientId = "wallet-dev"
 	public static var defaultOpenID4VciRedirectUri = URL(string: "eudi-openid4ci://authorize")!
-	public static var defaultOpenId4VCIConfig = OpenId4VCIConfig(clientId: defaultClientId, authFlowRedirectionURI: defaultOpenID4VciRedirectUri)
+    public static var defaultOpenId4VCIConfig = OpenId4VCIConfig(client: DefaultClient(id: defaultClientId), authFlowRedirectionURI: defaultOpenID4VciRedirectUri, attestedClient: nil)
 	
 	public static var defaultServiceName = "eudiw"
 	/// Initialize a wallet instance. All parameters are optional.
@@ -143,20 +147,31 @@ public final class EudiWallet: ObservableObject {
 	///   - docType: document type
 	///   - promptMessage: Prompt message for biometric authentication (optional)
 	/// - Returns: (Issue request key pair, vci service, unique id)
-	func prepareIssuing(docType: String?, displayName: String?, promptMessage: String? = nil) async throws -> (IssueRequest, OpenId4VCIService, String) {
+    func prepareIssuing(docType: String?, displayName: String?, promptMessage: String? = nil, attestedClient: AttestedClient? = nil) async throws -> (IssueRequest, OpenId4VCIService, String) {
 		guard let openID4VciIssuerUrl else { throw WalletError(description: "issuer Url not defined")}
-		guard openID4VciConfig?.clientId != nil else { throw WalletError(description: "clientId not defined")}
+        guard openID4VciConfig?.client.id != nil else { throw WalletError(description: "clientId not defined")}
 		guard openID4VciConfig?.authFlowRedirectionURI != nil else { throw WalletError(description: "Auth flow Redirect URI not defined")}
 		let id: String = UUID().uuidString
 		let issueReq = try await Self.authorizedAction(action: {
 			return try await beginIssueDocument(id: id, privateKeyType: useSecureEnclave ? .secureEnclaveP256 : .x963EncodedP256, saveToStorage: false)
 		}, disabled: !userAuthenticationRequired || docType == nil, dismiss: {}, localizedReason: promptMessage ?? NSLocalizedString("issue_document", comment: "").replacingOccurrences(of: "{docType}", with: NSLocalizedString(displayName ?? docType ?? "", comment: "")))
 		guard let issueReq else { throw LAError(.userCancel)}
-		let openId4VCIService = OpenId4VCIService(issueRequest: issueReq, credentialIssuerURL: openID4VciIssuerUrl, config: openID4VciConfig ?? OpenId4VCIConfig(clientId: Self.defaultClientId, authFlowRedirectionURI: Self.defaultOpenID4VciRedirectUri), urlSession: urlSession)
+        
+        let openId4VCIService = OpenId4VCIService(
+            issueRequest: issueReq,
+            credentialIssuerURL: openID4VciIssuerUrl,
+            config: openID4VciConfig ?? OpenId4VCIConfig(
+                client: DefaultClient(
+                    id: Self.defaultClientId
+                ),
+                authFlowRedirectionURI: Self.defaultOpenID4VciRedirectUri,
+                attestedClient: attestedClient),
+            urlSession: urlSession
+        )
 		return (issueReq, openId4VCIService, id)
 	}
     
-    @discardableResult public func issuePAR(docType: String, format: DataFormat = .cbor, promptMessage: String? = nil) async throws -> WalletStorage.Document {
+    @discardableResult public func issuePAR(docType: String, format: DataFormat = .cbor, promptMessage: String? = nil, pop: String? = nil) async throws -> WalletStorage.Document {
         let (issueReq, openId4VCIService, id) = try await prepareIssuing(docType: docType, displayName: nil, promptMessage: promptMessage)
         let data = try await openId4VCIService.issuePAR(docType: docType, format: format, promptMessage: promptMessage, useSecureEnclave: useSecureEnclave)
         return try await finalizeIssuing(id: id, data: data, docType: docType, format: format, issueReq: issueReq, openId4VCIService: openId4VCIService)
@@ -512,11 +527,12 @@ public final class EudiWallet: ObservableObject {
 	#endif
 	}
     
-    public func getCredentials(docType: String, dpopNonce: String, code: String) async throws -> WalletStorage.Document {
+    public func getCredentials(docType: String, dpopNonce: String, code: String, clientAttestation: ClientAttestation? = nil) async throws -> WalletStorage.Document {
             let (issueReq, openId4VCIService, id) = try await prepareIssuing(docType: nil, displayName: nil)
             guard let cborData = try await openId4VCIService.getCredentials(
                 dpopNonce: dpopNonce,
-                code: code
+                code: code,
+                clientAttestation: clientAttestation
             ) else {
                 throw  WalletError(description: "Error in getting access token")
             }
