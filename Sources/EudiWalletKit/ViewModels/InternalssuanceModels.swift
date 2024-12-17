@@ -15,10 +15,17 @@ limitations under the License.
 */
 
 import Foundation
-import OpenID4VCI
+@preconcurrency import OpenID4VCI
 import WalletStorage
 
-struct DeferredIssuanceModel: Codable {
+struct CredentialConfiguration: Sendable {
+	let identifier: CredentialConfigurationIdentifier
+	let scope: String
+	let displayName: String?
+	let algValuesSupported: [String]
+}
+
+struct DeferredIssuanceModel: Codable, Sendable {
 	let deferredCredentialEndpoint: CredentialIssuerEndpoint
 	let accessToken: IssuanceAccessToken
 	let refreshToken: IssuanceRefreshToken?
@@ -35,6 +42,7 @@ struct PendingIssuanceModel: Codable {
 	let pendingReason: PendingReason
 	let identifier: CredentialConfigurationIdentifier
 	let displayName: String
+	let algValuesSupported: [String]
 	let metadataKey: String
 	let pckeCodeVerifier: String
 	let pckeCodeVerifierMethod: String
@@ -47,10 +55,24 @@ enum IssuanceOutcome {
 }
 
 extension IssuanceOutcome {
-	var isDeferred: Bool { switch self { case .deferred(_): true; default: false } }
-	var isPending: Bool { switch self { case .pending(_): true; default: false } }
-	var pendingOrDeferredStatus: DocumentStatus? { switch self { case .deferred(_): .deferred; case .pending(_): .pending; default: nil } }
+	var isDeferred: Bool {
+		switch self {
+		case .deferred(_): true
+		default: false
+		}
+	}
+	var isPending: Bool {
+		switch self {
+		case .pending(_): true
+		default: false
+		}
+	}
+	var pendingOrDeferredStatus: DocumentStatus? {
+		switch self {
+		case .deferred(_): .deferred
+		case .pending(_): .pending
+		default: nil
+		}
+	}
 }
-
-	
 
