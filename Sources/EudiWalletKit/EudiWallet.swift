@@ -270,7 +270,7 @@ public final class EudiWallet: ObservableObject, @unchecked Sendable {
 		await storage.refreshPublishedVars()
 		
 		do {
-			if pds == nil { try await storage.removePendingOrDeferredDoc(id: issueReq.id) }
+			if pds == nil { await storage.removeAllPendingDocs() }
 		} catch { }
 		return newDocument
 	}
