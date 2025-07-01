@@ -94,6 +94,12 @@ extension WalletStorage.Document {
 		if docDataFormat == .sdjwt, let ncs = docMetadata?.flatClaims?.filter({ $1.getDisplayName(uiCulture) != nil}).mapValues({ $0.getDisplayName(uiCulture)! }) { return ["": ncs] }
 		return nil
 	}
+
+	public var docTypeIdentifier: DocTypeIdentifier? {
+		if docDataFormat == .cbor, let docType = docType { return .msoMdoc(docType: docType) }
+		else if docDataFormat == .sdjwt, let vct = docType { return .sdJwt(vct: vct) }
+		return nil
+	}
 }
 
 extension ClaimSet: @retroactive @unchecked Sendable {}
