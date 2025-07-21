@@ -65,6 +65,10 @@ extension OpenId4VCIService {
 		let authorized = try await issuer.authorizeWithAuthorizationCode(authorizationCode: .authorizationCode(AuthorizationCodeRetrieved(credentials: [.init(value: model.configuration.configurationIdentifier.value)], authorizationCode: IssuanceAuthorization(authorizationCode: authorizationCode), pkceVerifier: pkceVerifier, configurationIds: [model.configuration.configurationIdentifier], dpopNonce: nil))).get()
 		
 		let authReqParams = convertAuthorizedRequestToParam(authorizedRequest: authorized)
+		// MARK: - temporary solution to use UserDeaults here, will be removed after accepting Draft 15 changes
+		if let cnonce = authReqParams?.cNonce as? String {
+			UserDefaults.standard.set(cnonce, forKey: "wteNonce")
+		}
 		
 		for i in 0..<batchCount {
 			try await initSecurityKeys(algSupported: Set(model.configuration.algValuesSupported), docID: issueRequestsIds[i])
