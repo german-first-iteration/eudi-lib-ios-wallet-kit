@@ -49,6 +49,9 @@ public struct OpenId4VpConfiguration: Sendable {
 	public init(clientIdSchemes: [ClientIdScheme]) {
 		self.clientIdSchemes = clientIdSchemes
 	}
+	public init(clientIdSchemes: [ClientIdScheme]) {
+		self.clientIdSchemes = clientIdSchemes
+	}
 }
 
 extension PreregisteredClient {
