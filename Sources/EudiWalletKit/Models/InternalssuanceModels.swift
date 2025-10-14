@@ -16,28 +16,49 @@ limitations under the License.
 
 import Foundation
 import MdocDataModel18013
-@preconcurrency import OpenID4VCI
+import OpenID4VCI
 import WalletStorage
 
-struct CredentialConfiguration: Sendable, Codable {
+struct CredentialConfiguration: Codable, Sendable {
+	/// the credential issuer identifier (issuer URL)
 	let configurationIdentifier: CredentialConfigurationIdentifier
 	let credentialIssuerIdentifier: String
 	let docType: String?
-	let scope: String
-	let display: [MdocDataModel18013.DisplayMetadata]
-	let issuerDisplay: [MdocDataModel18013.DisplayMetadata]
-	let algValuesSupported: [String]
-	let msoClaims: MsoMdocClaims?
-	let flatClaims: [String: Claim]?
-	let order: [String]?
+	let vct: String?
+	let scope: String?
+	//public let cryptographicBindingMethodsSupported: [CryptographicBindingMethod]
+	let credentialSigningAlgValuesSupported: [String]
+	let issuerDisplay: [DisplayMetadata]    //public let proofTypesSupported: [String: ProofTypeSupportedMeta]?
+	let display: [DisplayMetadata]
+	let claims: [Claim]
 	let format: DocDataFormat
-}
+	var batchSize: Int?
+	var credentialPolicy: CredentialPolicy?
+	var defaultKeyOptions: KeyOptions { get { KeyOptions(credentialPolicy: credentialPolicy ?? .rotateUse, batchSize: batchSize ?? 1) } set { batchSize = newValue.batchSize; credentialPolicy = newValue.credentialPolicy } }
+
+	public init(configurationIdentifier: CredentialConfigurationIdentifier, credentialIssuerIdentifier: String, docType: String? = nil, vct: String? = nil, scope: String? = nil, credentialSigningAlgValuesSupported: [String], issuerDisplay: [DisplayMetadata], display: [DisplayMetadata], claims: [Claim], format: DocDataFormat, batchSize: Int? = nil, defaultKeyOptions: KeyOptions) {
+		self.configurationIdentifier = configurationIdentifier
+		self.credentialIssuerIdentifier = credentialIssuerIdentifier
+		self.docType = docType
+		self.vct = vct
+		self.scope = scope
+		//self.cryptographicBindingMethodsSupported = cryptographicBindingMethodsSupported
+		self.credentialSigningAlgValuesSupported = credentialSigningAlgValuesSupported
+		self.issuerDisplay = issuerDisplay
+		self.display = display
+		self.claims = claims
+		self.format = format
+		self.batchSize = batchSize
+		self.defaultKeyOptions = defaultKeyOptions
+	}
+ }
 
 struct DeferredIssuanceModel: Codable, Sendable {
 	let deferredCredentialEndpoint: CredentialIssuerEndpoint
 	let accessToken: IssuanceAccessToken
 	let refreshToken: IssuanceRefreshToken?
 	let transactionId: TransactionId
+	let derKeyData: Data?
 	let configuration: CredentialConfiguration
 	let timeStamp: TimeInterval
 }
@@ -55,7 +76,7 @@ struct PendingIssuanceModel: Codable {
 }
 
 enum IssuanceOutcome {
-	case issued(Data?, String?, CredentialConfiguration)
+	case issued([(Data?, String?)], CredentialConfiguration)
 	case deferred(DeferredIssuanceModel)
 	case pending(PendingIssuanceModel)
 }
@@ -79,6 +100,12 @@ extension IssuanceOutcome {
 		case .pending(_): .pending
 		default: nil
 		}
+	}
+
+	func getDataToSave(index: Int, format: DocDataFormat) -> Data {
+		guard case let .issued(dataPairs, _) = self, dataPairs.count > index else { return Data() }
+		let (data, str) = dataPairs[index]
+		return if format == .cbor, let data { data } else if let str, let sd = str.data(using: .utf8) { sd } else { Data() }
 	}
 }
 
