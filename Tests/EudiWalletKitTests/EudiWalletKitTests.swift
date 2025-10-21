@@ -35,7 +35,7 @@ struct EudiWalletKitTests {
 		let wrapper = try JSONDecoder().decode(Wrapper.self, from: testDcqlData)
 		let testDcql = wrapper.dcql_query
 		do {
-			let (items, fmtsRequested, _) = try Openid4VpUtils.parseDcql(testDcql,  idsToDocTypes: [:], dataFormats: [:], docDisplayNames: [:])
+			let (items, fmtsRequested, _) = try Openid4VpUtils.parseDcql(testDcql,  idsToDocTypes: ["1": "urn:eu.europa.ec.eudi:pid:1"], dataFormats: [:], docDisplayNames: [:])
 			if let items, let docType = items.first?.key, let nsItems = items.first?.value.first {
 				print("DocType: ", docType, "ns:", nsItems.key, "Items: ", nsItems.value.map { $0.elementIdentifier })
 				#expect(fmtsRequested.allSatisfy({ (k,v) in v == format }))
@@ -65,7 +65,7 @@ struct EudiWalletKitTests {
 		let data = Data(name: "mdoc-\(dt)", ext: "txt", from: Bundle.module)!
 		let strData = try #require(String(data: data, encoding: .utf8))
 		let base64Data = try #require(Data(base64URLEncoded: strData))
-		let dr = try #require(DeviceResponse(data: [UInt8](base64Data)))
+		let dr = try DeviceResponse(data: [UInt8](base64Data))
 		let iss = try #require(dr.documents?.first?.issuerSigned)
 		#expect("org.iso.18013.5.1.mDL" == iss.issuerAuth.mso.docType)
 	}

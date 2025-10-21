@@ -22,6 +22,7 @@ import MdocSecurity18013
 import WalletStorage
 import SwiftCBOR
 import SwiftyJSON
+import struct eudi_lib_sdjwt_swift.ClaimPath
 import eudi_lib_sdjwt_swift
 
 extension String {
@@ -31,11 +32,11 @@ extension String {
 }
 
 func secCall<Result>(_ body: (_ resultPtr: UnsafeMutablePointer<Unmanaged<CFError>?>) -> Result?) throws -> Result {
-	var errorQ: Unmanaged<CFError>? = nil
-	guard let result = body(&errorQ) else {
-		throw errorQ!.takeRetainedValue() as Error
-	}
-	return result
+    var errorQ: Unmanaged<CFError>? = nil
+    guard let result = body(&errorQ) else {
+        throw errorQ!.takeRetainedValue() as Error
+    }
+    return result
 }
 
 extension Display {
@@ -53,15 +54,15 @@ extension Bundle {
 }
 
 extension Data {
-	  public init?(base64urlEncoded input: String) {
-		  var base64 = input
-		  base64 = base64.replacingOccurrences(of: "-", with: "+")
-		  base64 = base64.replacingOccurrences(of: "_", with: "/")
-		  while base64.count % 4 != 0 {
-			  base64 = base64.appending("=")
-		  }
-		  self.init(base64Encoded: base64)
-	  }
+      public init?(base64urlEncoded input: String) {
+          var base64 = input
+          base64 = base64.replacingOccurrences(of: "-", with: "+")
+          base64 = base64.replacingOccurrences(of: "_", with: "/")
+          while base64.count % 4 != 0 {
+              base64 = base64.appending("=")
+          }
+          self.init(base64Encoded: base64)
+      }
 }
 
 extension FileManager {
@@ -75,13 +76,13 @@ extension FileManager {
 }
 
 extension Encodable {
-	/// Converting object to postable JSON
-	func toJSON(_ encoder: JSONEncoder = JSONEncoder()) -> [String: Any] {
-		guard let data = try? encoder.encode(self),
-			  let object = try? JSONSerialization.jsonObject(with: data, options: .allowFragments),
-			  let json = object as? [String: Any] else { return [:] }
-		return json
-	}
+    /// Converting object to postable JSON
+    func toJSON(_ encoder: JSONEncoder = JSONEncoder()) -> [String: Any] {
+        guard let data = try? encoder.encode(self),
+              let object = try? JSONSerialization.jsonObject(with: data, options: .allowFragments),
+              let json = object as? [String: Any] else { return [:] }
+        return json
+    }
 }
 
 extension WalletStorage.Document {
@@ -160,6 +161,15 @@ extension Claim {
 	var metadata: DocClaimMetadata { DocClaimMetadata(display: display?.map(\.displayMetadata), isMandatory: mandatory, claimPath: path.value.map(\.description)) }
 }
 
+extension DocClaim {
+	var claimPath: ClaimPath {
+		ClaimPath(path.map { ClaimPathElement.claim(name: $0) })
+	}
+	var claimPaths: [ClaimPath] {
+		if let children { children.map(\.claimPath) } else { [claimPath] }
+	}
+}
+
 extension Array where Element == DocClaimMetadata {
 	func convertToCborClaimMetadata(_ uiCulture: String?) -> (displayNames: [NameSpace: [String: String]], mandatory: [NameSpace: [String: Bool]]) {
 		guard allSatisfy({ $0.claimPath.count > 1 }) else { return ([:], [:]) } // sanity check
@@ -196,6 +206,10 @@ extension DocMetadata {
 
 extension DocKeyInfo {
 	static var `default`: Self { DocKeyInfo(secureAreaName: SoftwareSecureArea.name, batchSize: 1, credentialPolicy: .rotateUse) }
+}
+
+extension IssueRequest {
+	var dpopKeyId: String { id + "_dpop" }
 }
 
 extension URL {
@@ -259,9 +273,9 @@ extension JSON {
 
 
 extension SecureAreaSigner: eudi_lib_sdjwt_swift.AsyncSignerProtocol {
-	func signAsync(_ data: Data) async throws -> Data {
-		return try await sign(data)
-	}
+    func signAsync(_ data: Data) async throws -> Data {
+        return try await sign(data)
+    }
 
 }
 

@@ -1,3 +1,105 @@
+## v0.16.4
+- Fix to show all mandatory elements of sd-jwt document during sharing
+- The wallet can be configured with OpenID4VCI options including DPoP (Demonstrating Proof-of-Possession) support and key options for DPoP key generation:
+
+```swift
+// Configure OpenID4VCI with DPoP support
+let openID4VciConfig = OpenId4VCIConfiguration(
+    useDpopIfSupported: true,  // Enable DPoP if supported by issuer (default: true)
+    dpopKeyOptions: KeyOptions(
+        secureAreaName: "SecureEnclave", curve: .P256, accessControl: .requireUserPresence
+    )
+)
+```
+
+- **Breaking change**: Batch size and credential policy are passed with a `CredentialOptions` parameter:
+  - `issueDocument(docTypeIdentifier:credentialOptions:keyOptions:promptMessage:)` 
+  - `getDefaultCredentialOptions(_:)` 
+  - `requestDeferredIssuance(deferredDoc:credentialOptions:keyOptions:)` 
+  - `resumePendingIssuance(pendingDoc:webUrl:credentialOptions:keyOptions:)` 
+  - `beginIssueDocument(id:credentialOptions:keyOptions:bDeferred:)` 
+
+## v0.16.3
+- Update eudi-lib-ios-siop-openid4vp-swift dependency to 0.17.6
+
+## v0.16.2
+- **Feature**: Added DPoP configuration support
+  - Added `useDpopIfSupported` property to `OpenId4VCIConfiguration` to enable/disable DPoP usage (default: `true`)
+  - Conditionally use DPoP constructor based on the `useDpopIfSupported` configuration setting
+  - DPoP is now only used when both supported by the issuer and enabled in the configuration
+
+
+## v0.16.1
+- Fix deferred issuance bug
+
+## v0.16.0
+- **Breaking change**: Updated OpenID4VCI to version 0.16.0 with support for OpenID4VCI v1.0 specification
+  - Updated `eudi-lib-ios-openid4vci-swift` from version 0.7.6 to 0.16.0
+  - Implemented changes for OpenID4VCI v1.0 specification compatibility:
+    - Updated deferred credential issuance handling to support new API with separate `transactionId` and `interval` parameters
+    - Enhanced credential metadata access through new `ConfigurationCredentialMetadata` structure
+    - Added support for new `issuanceStillPending` case in deferred credential flows
+    - Improved error handling and logging for deferred credential scenarios
+- Updated `eudi-lib-sdjwt-swift` from version 0.8.0 to 0.9.1
+
+## v0.15.0
+- Update dependency versions
+  - Updated `eudi-lib-ios-iso18013-data-transfer` from version 0.8.0 to 0.8.1
+  - Updated `eudi-lib-ios-siop-openid4vp-swift` from version 0.17.3 to 0.17.5
+- Enhanced CBOR document validation
+  - Perform CBOR document validation logic in `EudiWallet`, `validateIssuedDocuments` method:
+  	- CBOR element digest values are compared against the digest values provided in the issuer-signed Mobile Security Object (MSO) section of the document to ensure integrity and authenticity.
+	- MSO Signature is validated.
+	- MSO Validity info dates are validated.
+	- Doc type in MSO is the same as the doc type of the issued document.
+
+
+## v0.14.9
+- feat: introduce OpenID4VP configuration and refactor related classes
+  - Added new `OpenId4VpConfiguration` model with support for different client identifier schemes
+  - Introduced `ClientIdScheme` enum supporting preregistered clients, X.509 certificate validation (SAN DNS and hash), and redirect URI validation
+  - **Breaking change**: Refactored `EudiWallet` initialization and property to use a `OpenId4VpConfiguration` parameter instead of separate `verifierApiUri` and `verifierLegalName` parameters, for example: `wallet.openID4VpConfig = OpenId4VpConfiguration(clientIdSchemes: [.x509SanDns])`
+  - Added convenience initializer for `PreregisteredClient` from SiopOpenID4VP library
+  - Updated related services to work with the new configuration structure
+
+## v0.14.7
+- Fix: Throw error if one of the requested doc types is not present and credentialSets is nil
+
+## v0.14.6
+- Error reason [provided](https://eu-digital-identity-wallet.github.io/eudi-lib-ios-wallet-kit/documentation/eudiwalletkit/presentationsession/uierror) when OpenID4VP response is rejected
+
+## v0.14.5
+- Fix CBOR log document claim decoding logic
+
+## v0.14.4
+- Fix transaction logs decoding
+
+## v0.14.3
+- Update eudi-lib-ios-siop-openid4vp-swift dependency to version [0.17.2](https://github.com/eu-digital-identity-wallet/eudi-lib-ios-siop-openid4vp-swift/releases/tag/v0.17.2)
+
+## v0.14.2
+- Update eudi-lib-ios-siop-openid4vp-swift to 0.17.0 and enhance certificate verification
+
+## v0.14.1
+- Fixes bug for sd-jwt documents array values not transfered with online presentation e.g. nationalities for PID
+
+## v0.14.0
+- Updated OpenID4VP library to version [v0.16.0](https://github.com/eu-digital-identity-wallet/eudi-lib-ios-siop-openid4vp-swift/releases/tag/v0.16.0) and adjusted wallet kit accordingly.
+
+## v0.13.5
+- Update eudi-lib-ios-openid4vci-swift to [0.15.4](https://github.com/eu-digital-identity-wallet/eudi-lib-ios-openid4vci-swift/releases/tag/v0.15.4)
+- Added  property `var credentialPocily: CredentialPolicy` to `DocClaimsDecodable`
+- fix for removing port from URL (issue #215)
+
+## v0.13.4
+- Update the eudi-lib-ios-siop-openid4vp-swift dependency to version 0.15.1 (JARM fix)
+
+## v0.13.3
+- Updated eudi-lib-ios-siop-openid4vp-swift library to version [v0.15.0](https://github.com/eu-digital-identity-wallet/eudi-lib-ios-siop-openid4vp-swift/releases/tag/v0.15.0)
+- Updated eudi-lib-ios-openid4vci-swift library to version [v0.15.2](https://github.com/eu-digital-identity-wallet/eudi-lib-ios-openid4vci-swift/releases/tag/v0.15.2)
+
+- **Breaking change**: Removed  `EudiWallet` property`verifierRedirectUri`
+
 ## v0.13.2
 
 ### Error Handling Improvements:
@@ -19,7 +121,7 @@
 
 ### Changes:
 - `DocClaimsDecodable` has a new property `var credentialsUsageCounts: CredentialsUsageCounts?`
-This property provides information about the number of remaining presentations available for a document, based on its credential policy. It is useful for documents issued with a one-time use policy, where it returns the number of remaining presentations available. For documents with a rotate-use policy, it returns nil as there's no usage limit. 
+This property provides information about the number of remaining presentations available for a document, based on its credential policy. It is useful for documents issued with a one-time use policy, where it returns the number of remaining presentations available. For documents with a rotate-use policy, it returns nil as there's no usage limit.
 - Deprecated `getCredentialsUsageCount` method in `EudiWallet`. Use the new `credentialsUsageCounts` property instead.
 
 #### Performance Improvements:
@@ -38,7 +140,7 @@ This property provides information about the number of remaining presentations a
 #### Performance Improvements:
 - **Issuer metadata caching**: Added caching to `OpenId4VCIService.getIssuerMetadata` to improve performance by storing successful issuer metadata results in memory and avoiding redundant network requests during the same session. The cache is automatically cleared after changing issuerUrl.
 
-#### Bug fixes: 
+#### Bug fixes:
  - When the `getCredentialsUsageCount` method is called, if the remaining count is 0, the `validUntil` property of the credential is now correctly set to `nil`.
 
 #### Breaking Changes:

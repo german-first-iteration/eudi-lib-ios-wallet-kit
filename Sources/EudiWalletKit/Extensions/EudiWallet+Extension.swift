@@ -14,11 +14,11 @@ import SwiftyJSON
 
 extension EudiWallet {
 	@MainActor
-	@discardableResult public func issuePAR(docTypeIdentifier: DocTypeIdentifier, keyOptions: KeyOptions? = nil, promptMessage: String? = nil, dpopConstructorParam: IssuerDPoPConstructorParam) async throws -> WalletStorage.Document? {
-		let usedKeyOptions = try await validateKeyOptions(docTypeIdentifier: docTypeIdentifier, keyOptions: keyOptions)
-		let openId4VCIService = try await prepareIssuing(id: UUID().uuidString, docTypeIdentifier: docTypeIdentifier, displayName: nil, keyOptions: usedKeyOptions, disablePrompt: false, promptMessage: promptMessage)
+	@discardableResult public func issuePAR(docTypeIdentifier: DocTypeIdentifier, credentialOptions: CredentialOptions?, keyOptions: KeyOptions? = nil, promptMessage: String? = nil, dpopConstructorParam: IssuerDPoPConstructorParam, clientAttestation: ClientAttestation) async throws -> WalletStorage.Document? {
+		let usedKeyOptions = try await validateCredentialOptions(docTypeIdentifier: docTypeIdentifier, credentialOptions: credentialOptions)
+		let openId4VCIService = try await prepareIssuing(id: UUID().uuidString, docTypeIdentifier: docTypeIdentifier, displayName: nil, credentialOptions: usedKeyOptions, keyOptions: keyOptions, disablePrompt: false, promptMessage: promptMessage)
 
-		let (issuance, dataFormat) = try await openId4VCIService.issuePAR(docTypeIdentifier, promptMessage: promptMessage, dpopConstructorParam: dpopConstructorParam)
+		let (issuance, dataFormat) = try await openId4VCIService.issuePAR(docTypeIdentifier, promptMessage: promptMessage, dpopConstructorParam: dpopConstructorParam, clientAttestation: clientAttestation)
 		guard let issuance else {
 			return nil
 		}
@@ -27,13 +27,13 @@ extension EudiWallet {
 	}
 
 	@MainActor
-	@discardableResult public func resumePendingIssuanceDocuments(pendingDoc: WalletStorage.Document, authorizationCode: String, keyOptions: KeyOptions? = nil) async throws -> (WalletStorage.Document?, AuthorizedRequest?) {
+	@discardableResult public func resumePendingIssuanceDocuments(pendingDoc: WalletStorage.Document, authorizationCode: String, credentialOptions: CredentialOptions, keyOptions: KeyOptions? = nil) async throws -> (WalletStorage.Document?, AuthorizedRequest?) {
 
 		guard pendingDoc.status == .pending, let docTypeIdentifier = pendingDoc.docTypeIdentifier else {
 			throw PresentationSession.makeError(str: "Invalid document status for pending issuance: \(pendingDoc.status)")
 		}
-		let usedKeyOptions = try await validateKeyOptions(docTypeIdentifier: docTypeIdentifier, keyOptions: keyOptions)
-		let openId4VCIService = try await prepareIssuing(id: pendingDoc.id, docTypeIdentifier: docTypeIdentifier, displayName: nil, keyOptions: usedKeyOptions, disablePrompt: true, promptMessage: nil)
+		let usedCredentialOptions = try await validateCredentialOptions(docTypeIdentifier: docTypeIdentifier, credentialOptions: credentialOptions)
+		let openId4VCIService = try await prepareIssuing(id: pendingDoc.id, docTypeIdentifier: docTypeIdentifier, displayName: nil, credentialOptions: usedCredentialOptions, keyOptions: keyOptions, disablePrompt: true, promptMessage: nil)
 		let (outcome, authRequest) = try await openId4VCIService.resumePendingIssuance(pendingDoc: pendingDoc, authorizationCode: authorizationCode)
 		if case .pending(_) = outcome { return (pendingDoc, nil) }
 		let res = try await finalizeIssuing(issueOutcome: outcome, docType: pendingDoc.docType, format: pendingDoc.docDataFormat, issueReq: openId4VCIService.issueReq)
@@ -80,10 +80,10 @@ extension EudiWallet {
 		guard let openID4VciIssuerUrl else { throw WalletError(description: "issuer Url not defined")}
 
 		let issueReq = try await Self.authorizedAction(action: {
-			return try await beginIssueDocument(id: id, keyOptions: keyOptions)
+			return try await beginIssueDocument(id: id, credentialOptions: CredentialOptions(credentialPolicy: .oneTimeUse, batchSize: 42), keyOptions: keyOptions)
 		}, disabled: !userAuthenticationRequired || docType == nil, dismiss: {}, localizedReason: promptMessage ?? NSLocalizedString("issue_document", comment: "").replacingOccurrences(of: "{docType}", with: NSLocalizedString(displayName ?? docType ?? "", comment: "")))
 		guard let issueReq else { throw LAError(.userCancel)}
-		let openId4VCIService = await OpenId4VCIService(issueRequest: issueReq, credentialIssuerURL: openID4VciIssuerUrl, uiCulture: uiCulture, config: openID4VciConfig.toOpenId4VCIConfig(), cacheIssuerMetadata: true, networking: networkingVci)
+		let openId4VCIService = await OpenId4VCIService(issueRequest: issueReq, credentialIssuerURL: openID4VciIssuerUrl, uiCulture: uiCulture, config: openID4VciConfig, cacheIssuerMetadata: openID4VciConfig.cacheIssuerMetadata, networking: networkingVci)
 
 		return (issueReq, openId4VCIService)
 	}

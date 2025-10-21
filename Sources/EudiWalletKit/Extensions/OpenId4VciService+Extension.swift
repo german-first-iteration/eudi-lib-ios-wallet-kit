@@ -13,10 +13,9 @@ import JOSESwift
 import WalletStorage
 
 extension OpenId4VCIService {
-
-	func issuePAR(_ docTypeIdentifier: DocTypeIdentifier, promptMessage: String? = nil, dpopConstructorParam: IssuerDPoPConstructorParam) async throws -> (IssuanceOutcome?, DocDataFormat) {
+	func issuePAR(_ docTypeIdentifier: DocTypeIdentifier, promptMessage: String? = nil, dpopConstructorParam: IssuerDPoPConstructorParam, clientAttestation: ClientAttestation) async throws -> (IssuanceOutcome?, DocDataFormat) {
 		logger.log(level: .info, "Issuing document with docType or scope or identifier: \(docTypeIdentifier.value)")
-		let res = try await issueByPARType(docTypeIdentifier, promptMessage: promptMessage, dpopConstructorParam: dpopConstructorParam)
+		let res = try await issueByPARType(docTypeIdentifier, promptMessage: promptMessage, issuerDPopConstructorParam: dpopConstructorParam, clientAttestation: clientAttestation)
 		return res
 	}
 	
@@ -30,7 +29,7 @@ extension OpenId4VCIService {
 			}
 		}
 		guard let offer = Self.credentialOfferCache[model.metadataKey] else { throw WalletError(description: "Pending issuance cannot be completed") }
-		let issuer = try getIssuer(offer: offer)
+		let issuer = try await getIssuer(offer: offer)
 		logger.info("Starting issuing with identifer \(model.configuration.configurationIdentifier.value)")
 
 		let pkceVerifier = try PKCEVerifier(codeVerifier: model.pckeCodeVerifier, codeVerifierMethod: model.pckeCodeVerifierMethod)
@@ -84,16 +83,23 @@ extension OpenId4VCIService {
 		return (nil, nil, nil)
 	}
 
-	private func issueByPARType(_ docTypeIdentifier: DocTypeIdentifier, promptMessage: String? = nil, dpopConstructorParam: IssuerDPoPConstructorParam) async throws -> (IssuanceOutcome?, DocDataFormat) {
+	private func issueByPARType(_ docTypeIdentifier: DocTypeIdentifier, promptMessage: String? = nil, issuerDPopConstructorParam: IssuerDPoPConstructorParam, clientAttestation: ClientAttestation) async throws -> (IssuanceOutcome?, DocDataFormat) {
+		let dpopConstructor = DPoPConstructor(algorithm: JWSAlgorithm(.ES256), jwk: issuerDPopConstructorParam.jwk, privateKey: .secKey(issuerDPopConstructorParam.privateKey))
+		let issuerInfo = try await fetchIssuerAndOfferWithLatestMetadata(docTypeIdentifier: docTypeIdentifier, dpopConstructor: dpopConstructor)
+		guard let issuer = issuerInfo.0, let offer = issuerInfo.1 else {
+			return (nil, .cbor)
+		}
+
 		let (credentialIssuerIdentifier, metaData) = try await getIssuerMetadata()
 		if let authorizationServer = metaData.authorizationServers?.first {
 			let authServerMetadata = await AuthorizationServerMetadataResolver(oidcFetcher: Fetcher(session: networking), oauthFetcher: Fetcher(session: networking)).resolve(url: authorizationServer)
 			let configuration = try getCredentialConfiguration(credentialIssuerIdentifier: credentialIssuerIdentifier.url.absoluteString.replacingOccurrences(of: "https://", with: ""), issuerDisplay: metaData.display, credentialsSupported: metaData.credentialsSupported, identifier: docTypeIdentifier.configurationIdentifier, docType: docTypeIdentifier.docType, vct: docTypeIdentifier.vct, batchCredentialIssuance: metaData.batchCredentialIssuance)
-			let offer = try CredentialOffer(credentialIssuerIdentifier: credentialIssuerIdentifier, credentialIssuerMetadata: metaData, credentialConfigurationIdentifiers: [configuration.configurationIdentifier], grants: nil, authorizationServerMetadata: try authServerMetadata.get())
+//			let offer = try CredentialOffer(credentialIssuerIdentifier: credentialIssuerIdentifier, credentialIssuerMetadata: metaData, credentialConfigurationIdentifiers: [configuration.configurationIdentifier], grants: nil, authorizationServerMetadata: try authServerMetadata.get())
 
 			// Authorize with auth code flow
-			let issuer = try getIssuer(offer: offer)
-			let authorizedOutcome = try await authorizePARWithAuthCodeUseCase(issuer: issuer, offer: offer)
+//			let issuer = try await getIssuer(offer: offer)
+
+			let authorizedOutcome = try await authorizePARWithAuthCodeUseCase(issuer: issuer, offer: offer, clientAttestation: clientAttestation)
 			if case .presentation_request(let url) = authorizedOutcome, let authRequested {
 				logger.info("Dynamic issuance request with url: \(url)")
 				let uuid = UUID().uuidString
@@ -117,18 +123,18 @@ extension OpenId4VCIService {
 
 			let offer = try CredentialOffer(credentialIssuerIdentifier: credentialIssuerIdentifier, credentialIssuerMetadata: metaData, credentialConfigurationIdentifiers: [configuration.configurationIdentifier], grants: nil, authorizationServerMetadata: try authServerMetadata.get())
 
-			let issuer = try getIssuer(offer: offer)
+			let issuer = try await getIssuer(offer: offer)
 
 			return (issuer, offer)
 		}
 		return (nil, nil)
 	}
 
-	private func authorizePARWithAuthCodeUseCase(issuer: Issuer, offer: CredentialOffer) async throws ->  AuthorizeRequestOutcome? {
+	private func authorizePARWithAuthCodeUseCase(issuer: Issuer, offer: CredentialOffer, clientAttestation: ClientAttestation) async throws ->  AuthorizeRequestOutcome? {
 		let pushedAuthorizationRequestEndpoint = if case let .oidc(metaData) = offer.authorizationServerMetadata, let endpoint = metaData.pushedAuthorizationRequestEndpoint { endpoint } else if case let .oauth(metaData) = offer.authorizationServerMetadata, let endpoint = metaData.pushedAuthorizationRequestEndpoint { endpoint } else { "" }
 		if config.usePAR && pushedAuthorizationRequestEndpoint.isEmpty { logger.info("PAR not supported, Pushed Authorization Request Endpoint is nil") }
 		logger.info("--> [AUTHORIZATION] Placing Request to AS server's endpoint \(pushedAuthorizationRequestEndpoint)")
-		let parPlaced = try await issuer.prepareAuthorizationRequest(credentialOffer: offer)
+		let parPlaced = try await issuer.prepareAuthorizationRequest(credentialOffer: offer, clientAttestation: clientAttestation.wia, clientAttestationPoP: clientAttestation.wiaPop)
 
 		if case let .success(request) = parPlaced,
 		   case let .prepared(authRequested) = request {
@@ -141,6 +147,60 @@ extension OpenId4VCIService {
 			throw WalletError(description: "Authorization error: \(failure.localizedDescription)")
 		}
 		throw WalletError(description: "Failed to get push authorization code request")
+	}
+
+	// MARK: Copy following function from OpenId4VCIService file
+	private func submissionUseCase(_ authorized: AuthorizedRequest, issuer: Issuer, configuration: CredentialConfiguration, bindingKeys: [BindingKey], publicKeys: [Data]) async throws -> IssuanceOutcome {
+		let payload: IssuanceRequestPayload = .configurationBased(credentialConfigurationIdentifier: configuration.configurationIdentifier)
+		let requestOutcome = try await issuer.requestCredential(request: authorized, bindingKeys: bindingKeys, requestPayload: payload) { Issuer.createResponseEncryptionSpec($0) }
+
+		switch requestOutcome {
+		case .success(let request):
+			switch request {
+			case .success(let response):
+				if let result = response.credentialResponses.first {
+					switch result {
+					case .deferred(let transactionId, let interval):
+						logger.info("Credential issuance deferred with transactionId: \(transactionId), interval: \(interval) seconds")
+						// Prepare model for deferred issuance
+						let derKeyData: Data? = if let encryptionSpec = await issuer.deferredResponseEncryptionSpec, let key = encryptionSpec.privateKey { try secCall { SecKeyCopyExternalRepresentation(key, $0)} as Data } else { nil }
+						let deferredModel = await DeferredIssuanceModel(deferredCredentialEndpoint: issuer.issuerMetadata.deferredCredentialEndpoint!, accessToken: authorized.accessToken, refreshToken: authorized.refreshToken, transactionId: transactionId, publicKeys: publicKeys, derKeyData: derKeyData, configuration: configuration, timeStamp: authorized.timeStamp)
+						return .deferred(deferredModel)
+					case .issued(let format, _, _, _):
+						let credentials =  response.credentialResponses.compactMap { if case let .issued(_, cr, _, _) = $0 { cr } else { nil } }
+						return try await handleCredentialResponse(credentials: credentials, publicKeys: publicKeys, format: format, configuration: configuration)
+					}
+				} else {
+					throw PresentationSession.makeError(str: "No credential response results available")
+				}
+			case .invalidProof:
+				throw PresentationSession.makeError(str: "Although providing a proof with c_nonce the proof is still invalid")
+			case .failed(let error):
+				throw PresentationSession.makeError(str: error.localizedDescription)
+			}
+		case .failure(let error):
+			throw PresentationSession.makeError(str: "Credential submission use case failed: \(error.localizedDescription)")
+		}
+	}
+
+	// MARK: Copy following function from OpenId4VCIService file
+	private func handleCredentialResponse(credentials: [Credential], publicKeys: [Data], format: String?, configuration: CredentialConfiguration) async throws -> IssuanceOutcome {
+		logger.info("Credential issued with format \(format ?? "unknown")")
+		let toData: (String) -> Data = { str in
+			if configuration.format == .cbor { return Data(base64URLEncoded: str) ?? Data() } else { return str.data(using: .utf8) ?? Data() }
+		}
+		let credData: [(Data, Data)] = try credentials.enumerated().flatMap { index, credential in
+		if case let .string(str) = credential  {
+			// logger.info("Issued credential data:\n\(str)")
+			return [(toData(str), publicKeys[index])]
+		} else if case let .json(json) = credential, json.type == .array, json.first != nil {
+			// logger.info("Issued credential data:\n\(json.first!.1["credential"].stringValue)")
+			return json.map { j in let str = j.1["credential"].stringValue; return (toData(str), publicKeys[index]) }
+		} else {
+			throw PresentationSession.makeError(str: "Invalid credential")
+		} }
+		if config.dpopKeyOptions != nil { try? await issueReq.secureArea.deleteKeyBatch(id: issueReq.dpopKeyId, startIndex: 0, batchSize: 1); try? await issueReq.secureArea.deleteKeyInfo(id: issueReq.dpopKeyId) }
+		return .issued(credData, configuration)
 	}
 }
 
@@ -175,5 +235,14 @@ public struct AuthorizedRequestParams: Sendable {
 		self.cNonce = cNonce
 		self.timeStamp = timeStamp
 		self.dPopNonce = dPopNonce
+	}
+}
+public struct ClientAttestation: Sendable {
+	public let wia: String
+	public let wiaPop: String
+	
+	public init(wia: String, wiaPop: String) {
+		self.wia = wia
+		self.wiaPop = wiaPop
 	}
 }
