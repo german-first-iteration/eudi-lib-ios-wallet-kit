@@ -1,3 +1,53 @@
+# German EUDI wallet specific changes:
+
+Strategy to pull Niscy’s code faster:
+
+Steps:
+
+Pull the code from Niscy’s code for Wallet Kit in our repository.
+
+Make the sure the extensions are present in the Extensions folders.(These are now designed to be isolated from Niscy’s code hence making it faster to pull.)
+
+Identify the protocol changes from upstream and make any necessary changes.(if needed)
+
+Verify by integrating it with UI and e2e tests.
+
+📂 Structure
+
+Extension/
+
+EudiWallet+Extension
+
+OpenId4VciService+Extension
+
+🎯 Purpose
+
+Provide functions required by the UI layer.
+
+Functions inside the extensions are:
+
+Modified versions of functions already present in Niscy’s core.
+
+Built on top of existing core functions for consistency and reuse.
+
+🔄 Updates to Niscy Core
+
+When Niscy’s core is updated (via library pull):
+
+Core code will be refreshed.
+
+Extensions will remain unaffected, since they are not part of Niscy’s library.
+
+This approach ensures that custom logic remains stable across core updates.
+
+⚠️ Maintenance Notes
+
+If functions or classes used by these extensions change in Niscy’s core, corresponding changes may be required here.
+
+After every core update, validate extension compatibility as part of the update process.
+
+
+
 # EUDI Wallet Kit library for iOS
 
 **Important!** Before you proceed, please read
@@ -59,14 +109,15 @@ The library provides the following functionality:
         - [x] For pre-registered verifiers
         - [x] Dynamic registration of verifiers
 
-The library is written in Swift and is compatible with iOS 14 or higher. It is distributed as a Swift package
+The library is written in Swift and is compatible with iOS 16 or higher. It is distributed as a Swift package
 and can be included in any iOS project.
 
 It is based on the following specifications:
 - ISO/IEC 18013-5 – Published
 - Presentation Exchange v2.0.0 - Published
-- OpenID4VP – Draft 18
-- SIOPv2 – Draft
+- OpenID4VP – Draft 24
+- SIOPv2 – Draft 13
+- OpenID4VCI – Draft 15
 
 ### Disclaimer
 The released software is a initial development release version: 
@@ -84,7 +135,7 @@ The released software is a initial development release version:
 To use EUDI Wallet Kit, add the following dependency to your Package.swift:
 ```swift
 dependencies: [
-    .package(url: "https://github.com/eu-digital-identity-wallet/eudi-lib-ios-wallet-kit.git", .upToNextMajor(from: "0.6.6"))
+    .package(url: "https://github.com/eu-digital-identity-wallet/eudi-lib-ios-wallet-kit.git", .upToNextMajor(from: "0.12.2"))
 ]
 ```
 
@@ -184,7 +235,7 @@ The following example shows how to issue an EUDI Personal ID document using Open
 
 ```swift
 do {
-  let doc = try await userWallet.issueDocument(docType: EuPidModel.euPidDocType, keyOptions: KeyOptions(secureAreaName: "SecureEnclave", accessControl: [.requireUserPresence])])
+  let doc = try await userWallet.issueDocument(docType: EuPidModel.euPidDocType, keyOptions: KeyOptions(secureAreaName: "SecureEnclave", credentialPolicy: .oneTimeUse, batchSize: 5)
   // document has been added to wallet storage, you can display it
 }
 catch {
@@ -197,7 +248,8 @@ You can also issue a document by passing configuration `identifier` parameter th
   // get current issuer metadata
   let configuration = try await wallet.getIssuerMetadata()
   ...
-  let doc = try await userWallet.issueDocument(identifier: "eu.europa.ec.eudi.pid_vc_sd_jwt")
+  let doc = try await userWallet.issueDocument(identifier: "eu.europa.ec.eudi.pid_vc_sd_jwt", keyOptions: KeyOptions(secureAreaName: "SecureEnclave", credentialPolicy: .oneTimeUse, batchSize: 5)
+ 
 ```
 ### Resolving Credential offer
 
@@ -216,10 +268,16 @@ The following example shows how to resolve a credential offer:
 After user acceptance of the offer, the selected documents can be issued using the `issueDocumentsByOfferUrl(offerUri:docTypes:docTypeKeyOptions:txCodeValue:)` method.
 The `txCodeValue` parameter is not used in the case of the authorization code flow.
 The following example shows how to issue documents by offer URL:
-```swift
- let documents = try await walletController.issueDocumentsByOfferUrl(offerUri: uri,  docTypes: docOffers,
-   docTypeKeyOptions: [EuPidModel.euPidDocType : KeyOptions(secureAreaName: "SecureEnclave", accessControl: [.requireUserPresence])], txCodeValue: txCodeValue )
-```
+  ```swift
+ // When resolving an offer, key options are now included
+ let offer = try await wallet.resolveOfferUrlDocTypes(uriOffer: offerUrl)
+ for docModel in offer.docModels {
+	// use recommended key options or modify them
+	 let docTypes = offer.docModels.map { $0.copy(keyOptions: KeyOptions(credentialPolicy: .oneTimeUse, batchSize: 2))
+     // Issue with optimal settings
+     let newDocs = try await wallet.issueDocumentsByOfferUrl(offerUri: offerUrl, docTypes: docTypes, txCodeValue: txCode)
+ }
+ ```
 
 ### Authorization code flow
 
