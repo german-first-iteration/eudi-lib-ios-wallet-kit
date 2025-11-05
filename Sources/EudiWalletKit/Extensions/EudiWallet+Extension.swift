@@ -13,33 +13,40 @@ import OpenID4VCI
 import SwiftyJSON
 
 extension EudiWallet {
-	@MainActor
-	@discardableResult public func issuePAR(docTypeIdentifier: DocTypeIdentifier, credentialOptions: CredentialOptions?, keyOptions: KeyOptions? = nil, promptMessage: String? = nil, dpopConstructorParam: IssuerDPoPConstructorParam, clientAttestation: ClientAttestation) async throws -> WalletStorage.Document? {
-		let usedKeyOptions = try await validateCredentialOptions(docTypeIdentifier: docTypeIdentifier, credentialOptions: credentialOptions)
-		let openId4VCIService = try await prepareIssuing(id: UUID().uuidString, docTypeIdentifier: docTypeIdentifier, displayName: nil, credentialOptions: usedKeyOptions, keyOptions: keyOptions, disablePrompt: false, promptMessage: promptMessage)
 
-		let (issuance, dataFormat) = try await openId4VCIService.issuePAR(docTypeIdentifier, promptMessage: promptMessage, dpopConstructorParam: dpopConstructorParam, clientAttestation: clientAttestation)
-		guard let issuance else {
-			return nil
+	public func issuePAR(issuerName: String, docTypeIdentifier: DocTypeIdentifier, credentialOptions: CredentialOptions?, keyOptions: KeyOptions? = nil, promptMessage: String? = nil, dpopConstructorParam: IssuerDPoPConstructorParam, clientAttestation: ClientAttestation) async throws -> WalletStorage.Document? {
+
+		guard let vciService = OpenId4VCIServiceRegistry.shared.get(name: issuerName) else {
+			throw WalletError(description: "No OpenId4VCI service registered for name \(issuerName)")
 		}
 
-		return try await finalizeIssuing(issueOutcome: issuance, docType: docTypeIdentifier.docType, format: dataFormat, issueReq: openId4VCIService.issueReq)
+		return try await vciService.issuePAR(docTypeIdentifier, credentialOptions: credentialOptions, keyOptions: keyOptions, promptMessage: promptMessage, dpopConstructorParam: dpopConstructorParam, clientAttestation: clientAttestation)
+//		guard let issuance else {
+//			return nil
+//		}
+
+//		return try await finalizeIssuing(issueOutcome: issuance, docType: docTypeIdentifier.docType, format: dataFormat, issueReq: vciService.issueReq)
 	}
 
 	@MainActor
-	@discardableResult public func resumePendingIssuanceDocuments(pendingDoc: WalletStorage.Document, authorizationCode: String, credentialOptions: CredentialOptions, keyOptions: KeyOptions? = nil) async throws -> (WalletStorage.Document?, AuthorizedRequest?) {
-
-		guard pendingDoc.status == .pending, let docTypeIdentifier = pendingDoc.docTypeIdentifier else {
-			throw PresentationSession.makeError(str: "Invalid document status for pending issuance: \(pendingDoc.status)")
+	@discardableResult public func resumePendingIssuanceDocuments(issuerName: String, pendingDoc: WalletStorage.Document, credentialOptions: CredentialOptions, keyOptions: KeyOptions? = nil, authorizationCode: String) async throws -> WalletStorage.Document? {
+		guard let vciService = OpenId4VCIServiceRegistry.shared.get(name: issuerName) else {
+			throw WalletError(description: "No OpenId4VCI service registered for name \(issuerName)")
 		}
-		let usedCredentialOptions = try await validateCredentialOptions(docTypeIdentifier: docTypeIdentifier, credentialOptions: credentialOptions)
-		let openId4VCIService = try await prepareIssuing(id: pendingDoc.id, docTypeIdentifier: docTypeIdentifier, displayName: nil, credentialOptions: usedCredentialOptions, keyOptions: keyOptions, disablePrompt: true, promptMessage: nil)
-		let (outcome, authRequest) = try await openId4VCIService.resumePendingIssuance(pendingDoc: pendingDoc, authorizationCode: authorizationCode)
-		if case .pending(_) = outcome { return (pendingDoc, nil) }
-		let res = try await finalizeIssuing(issueOutcome: outcome, docType: pendingDoc.docType, format: pendingDoc.docDataFormat, issueReq: openId4VCIService.issueReq)
-		return (res, authRequest)
+		return try await vciService.resumePendingIssuance(pendingDoc: pendingDoc, credentialOptions: credentialOptions, keyOptions: keyOptions, authorizationCode: authorizationCode)
+
+//		guard pendingDoc.status == .pending, let docTypeIdentifier = pendingDoc.docTypeIdentifier else {
+//			throw PresentationSession.makeError(str: "Invalid document status for pending issuance: \(pendingDoc.status)")
+//		}
+//		let usedCredentialOptions = try await validateCredentialOptions(docTypeIdentifier: docTypeIdentifier, credentialOptions: credentialOptions)
+//		let openId4VCIService = try await prepareIssuing(id: pendingDoc.id, docTypeIdentifier: docTypeIdentifier, displayName: nil, credentialOptions: usedCredentialOptions, keyOptions: keyOptions, disablePrompt: true, promptMessage: nil)
+//		let (outcome, authRequest) = try await openId4VCIService.resumePendingIssuance(pendingDoc: pendingDoc, authorizationCode: authorizationCode)
+//		if case .pending(_) = outcome { return (pendingDoc, nil) }
+//		let res = try await finalizeIssuing(issueOutcome: outcome, docType: pendingDoc.docType, format: pendingDoc.docDataFormat, issueReq: openId4VCIService.issueReq)
+//		return (res, authRequest)
 	}
 
+	/*
 	@MainActor
 	public func getCredentials(with refreshToken: String, accessToken: String, docType: String?, identifier: String?, scope: String?, docTypeIdentifier: DocTypeIdentifier, keyOptions: KeyOptions? = nil, promptMessage: String? = nil, docDataFormat: DocDataFormat, issuerDPopConstructorParam: IssuerDPoPConstructorParam, batchCount: Int) async -> (WalletStorage.Document?, AuthorizedRequest?) {
 		do {
@@ -86,6 +93,6 @@ extension EudiWallet {
 		let openId4VCIService = await OpenId4VCIService(issueRequest: issueReq, credentialIssuerURL: openID4VciIssuerUrl, uiCulture: uiCulture, config: openID4VciConfig, cacheIssuerMetadata: openID4VciConfig.cacheIssuerMetadata, networking: networkingVci)
 
 		return (issueReq, openId4VCIService)
-	}
+	}*/
 
 }

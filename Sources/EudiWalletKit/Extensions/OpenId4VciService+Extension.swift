@@ -13,14 +13,24 @@ import JOSESwift
 import WalletStorage
 
 extension OpenId4VCIService {
-	func issuePAR(_ docTypeIdentifier: DocTypeIdentifier, promptMessage: String? = nil, dpopConstructorParam: IssuerDPoPConstructorParam, clientAttestation: ClientAttestation) async throws -> (IssuanceOutcome?, DocDataFormat) {
-		logger.log(level: .info, "Issuing document with docType or scope or identifier: \(docTypeIdentifier.value)")
+	func issuePAR(_ docTypeIdentifier: DocTypeIdentifier, credentialOptions: CredentialOptions?, keyOptions: KeyOptions? = nil, promptMessage: String? = nil, dpopConstructorParam: IssuerDPoPConstructorParam, clientAttestation: ClientAttestation) async throws -> WalletStorage.Document {
+		let usedKeyOptions = try await validateCredentialOptions(docTypeIdentifier: docTypeIdentifier, credentialOptions: credentialOptions)
+		try await prepareIssuing(id: UUID().uuidString, docTypeIdentifier: docTypeIdentifier, displayName: nil, credentialOptions: usedKeyOptions, keyOptions: keyOptions, disablePrompt: false, promptMessage: promptMessage)
 		let res = try await issueByPARType(docTypeIdentifier, promptMessage: promptMessage, issuerDPopConstructorParam: dpopConstructorParam, clientAttestation: clientAttestation)
-		return res
+
+		return try await finalizeIssuing(issueOutcome: res.0!, docType: docTypeIdentifier.docType, format: res.1, issueReq: issueReq)
 	}
 	
-	func resumePendingIssuance(pendingDoc: WalletStorage.Document, authorizationCode: String) async throws -> (IssuanceOutcome, AuthorizedRequest?) {
-		let model = try JSONDecoder().decode(PendingIssuanceModel.self, from: pendingDoc.data)
+	func resumePendingIssuance(pendingDoc: WalletStorage.Document, credentialOptions: CredentialOptions, keyOptions: KeyOptions? = nil, authorizationCode: String) async throws -> WalletStorage.Document {
+		guard pendingDoc.status == .pending, let docTypeIdentifier = pendingDoc.docTypeIdentifier else { throw PresentationSession.makeError(str: "Invalid document status for pending issuance: \(pendingDoc.status)")}
+		let usedCredentialOptions = try await validateCredentialOptions(docTypeIdentifier: docTypeIdentifier, credentialOptions: credentialOptions)
+		try await prepareIssuing(id: pendingDoc.id, docTypeIdentifier: docTypeIdentifier, displayName: nil, credentialOptions: usedCredentialOptions, keyOptions: keyOptions, disablePrompt: true, promptMessage: nil)
+		let outcome = try await resumePendingIssuance(pendingDoc: pendingDoc, authorizationCode: authorizationCode)
+		if case .pending(_) = outcome { return pendingDoc }
+		let res = try await finalizeIssuing(issueOutcome: outcome, docType: pendingDoc.docType, format: pendingDoc.docDataFormat, issueReq: issueReq)
+		return res
+
+		/*let model = try JSONDecoder().decode(PendingIssuanceModel.self, from: pendingDoc.data)
 		guard case .presentation_request_url(_) = model.pendingReason else { throw WalletError(description: "Unknown pending reason: \(model.pendingReason)") }
 		
 		if Self.credentialOfferCache[model.metadataKey] == nil {
@@ -43,9 +53,33 @@ extension OpenId4VCIService {
 //		let res = try await issueOfferedCredentialInternalValidated(authorized, offer: offer, issuer: issuer, configuration: model.configuration, claimSet: nil, algSupported: Set(model.configuration.algValuesSupported))
 //		Self.metadataCache.removeValue(forKey: model.metadataKey)
 		let res = try await submissionUseCase(authorized, issuer: issuer, configuration: model.configuration, bindingKeys: bindingKeys, publicKeys: publicKeys)
-		return (res, authorized)
+		return (res, authorized)*/
 	}
-	
+
+	func resumePendingIssuance(pendingDoc: WalletStorage.Document, authorizationCode: String) async throws -> IssuanceOutcome {
+		let model = try JSONDecoder().decode(PendingIssuanceModel.self, from: pendingDoc.data)
+		guard case .presentation_request_url(_) = model.pendingReason else {
+			throw PresentationSession.makeError(str: "Unknown pending reason: \(model.pendingReason)")
+		}
+//		guard let webUrl else {
+//			throw PresentationSession.makeError(str: "Web URL not specified")
+//		}
+//		let asWeb = try await loginUserAndGetAuthCode(authorizationCodeURL: webUrl)
+//		guard case .code(let authorizationCode) = asWeb else {
+//			throw PresentationSession.makeError(str: "Pending issuance not authorized")
+//		}
+		guard let offer = Self.credentialOfferCache[model.metadataKey] else {
+			throw PresentationSession.makeError(str: "Pending issuance cannot be completed")
+		}
+		let issuer = try await getIssuer(offer: offer)
+		logger.info("Starting issuing with identifer \(model.configuration.configurationIdentifier.value)")
+		let pkceVerifier = try PKCEVerifier(codeVerifier: model.pckeCodeVerifier, codeVerifierMethod: model.pckeCodeVerifierMethod)
+		let authorized = try await issuer.authorizeWithAuthorizationCode(request: .authorizationCode(AuthorizationCodeRetrieved(credentials: [.init(value: model.configuration.configurationIdentifier.value)], authorizationCode: IssuanceAuthorization(authorizationCode: authorizationCode), pkceVerifier: pkceVerifier, configurationIds: [model.configuration.configurationIdentifier], dpopNonce: nil))).get()
+		let (bindingKeys, publicKeys) = try await initSecurityKeys(algSupported: Set(model.configuration.credentialSigningAlgValuesSupported))
+		let res = try await submissionUseCase(authorized, issuer: issuer, configuration: model.configuration, bindingKeys: bindingKeys, publicKeys: publicKeys)
+		return res
+	}
+
 	func getCredentialsWithRefreshToken(docTypeIdentifier: DocTypeIdentifier, authorizedRequest: AuthorizedRequest, issuerDPopConstructorParam: IssuerDPoPConstructorParam, docId: String) async throws -> (IssuanceOutcome?, DocDataFormat?, AuthorizedRequest?) {
 
 		let dpopConstructor = DPoPConstructor(algorithm: JWSAlgorithm(.ES256), jwk: issuerDPopConstructorParam.jwk, privateKey: .secKey(issuerDPopConstructorParam.privateKey))
@@ -135,7 +169,8 @@ extension OpenId4VCIService {
 		if config.usePAR && pushedAuthorizationRequestEndpoint.isEmpty { logger.info("PAR not supported, Pushed Authorization Request Endpoint is nil") }
 		logger.info("--> [AUTHORIZATION] Placing Request to AS server's endpoint \(pushedAuthorizationRequestEndpoint)")
 		let parPlaced = try await issuer.prepareAuthorizationRequest(credentialOffer: offer, clientAttestation: clientAttestation.wia, clientAttestationPoP: clientAttestation.wiaPop)
-
+//		let parPlaced = try await issuer.prepareAuthorizationRequest(credentialOffer: offer)
+		
 		if case let .success(request) = parPlaced,
 		   case let .prepared(authRequested) = request {
 			self.authRequested = authRequested
@@ -204,7 +239,7 @@ extension OpenId4VCIService {
 	}
 }
 
-public struct IssuerDPoPConstructorParam {
+public struct IssuerDPoPConstructorParam: @unchecked Sendable {
 	let clientID: String?
 	let expirationDuration: TimeInterval?
 	let aud: String?
