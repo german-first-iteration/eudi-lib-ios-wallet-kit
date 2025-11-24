@@ -79,7 +79,9 @@ public actor OpenId4VCIService {
 		let selectedAlgorithm = try findCompatibleSigningAlgorithm(algSupported: algTypes)
 		let publicCoseKeys = try await issueReq.createKeyBatch()
 //		let unlockData = try await issueReq.secureArea.unlockKey(id: issueReq.id)
-		let bindingKeys = try publicCoseKeys.enumerated().map { try createBindingKey($0.element, secureAreaSigningAlg: selectedAlgorithm, unlockData: nil, index: $0.offset) }
+		let bindingKeys = try publicCoseKeys.enumerated().map {
+			try createBindingKey($0.element, secureAreaSigningAlg: selectedAlgorithm, unlockData: nil, index: $0.offset)
+		}
 		return (bindingKeys, publicCoseKeys.map { Data($0.toCBOR(options: CBOROptions()).encode()) })
 
 	}

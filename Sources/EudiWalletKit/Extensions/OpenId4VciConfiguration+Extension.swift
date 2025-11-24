@@ -29,14 +29,14 @@ extension OpenId4VciConfiguration {
 				dpopKeyOptions.additionalOptions = nonce.data(using: .utf8)
 			}
 			let publicCoseKey = (try await secureArea.createKeyBatch(id: dpopKeyId, credentialOptions: CredentialOptions(credentialPolicy: .rotateUse, batchSize: 1), keyOptions: dpopKeyOptions)).first!
-			let unlockData = try await secureArea.unlockKey(id: dpopKeyId)
+//			let unlockData = try await secureArea.unlockKey(id: dpopKeyId)
 			let ecAlgorithm = await secureArea.defaultSigningAlgorithm(ecCurve: dpopKeyOptions.curve)
-			let signer = try SecureAreaSigner(secureArea: secureArea, id: dpopKeyId, index: 0, ecAlgorithm: ecAlgorithm, unlockData: unlockData)
+			let signer = try SecureAreaSigner(secureArea: secureArea, id: dpopKeyId, index: 0, ecAlgorithm: ecAlgorithm, unlockData: nil)
 			privateKeyProxy = .custom(signer)
 			publicKey = try publicCoseKey.toSecKey()
-			await print(try secureArea.getKeyBatchInfo(id: dpopKeyId))
-			let keyBatchInfo = try await secureArea.getKeyBatchInfo(id: dpopKeyId)
-			keyAttestation = keyBatchInfo.attestation?.attestation?.first
+//			await print("getKeyBatchInfo:",try secureArea.getKeyBatchInfo(id: dpopKeyId))
+//			let keyBatchInfo = try await secureArea.getKeyBatchInfo(id: dpopKeyId)
+//			keyAttestation = keyBatchInfo.attestation?.attestation?.first
 		} else {
 			let setCommonJwsAlgorithmNames = Array(Set(algorithms.map(\.name)).intersection(Self.supportedDPoPAlgorithms.map(\.name))).sorted()
 			guard let algName = setCommonJwsAlgorithmNames.first else {
