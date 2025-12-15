@@ -42,6 +42,8 @@ public actor OpenId4VCIService {
 	var storage: StorageManager
 	var storageService: any DataStorageService
 	@MainActor var simpleAuthWebContext: SimpleAuthenticationPresentationContext!
+	typealias FuncKeyAttestationJWT = @Sendable (_ nonce: String?) async throws -> KeyAttestationJWT
+	var keyAttestationJwt: KeyAttestationJWT?
 
 	init(uiCulture: String?, config: OpenId4VciConfiguration, networking: Networking, storage: StorageManager, storageService: any DataStorageService) throws {
 		logger = Logger(label: "OpenId4VCI")
@@ -69,7 +71,8 @@ public actor OpenId4VCIService {
 	}
 
 	// create batch keys and return the binding keys and the `CoseKey` public keys in cbor format
-	func initSecurityKeys(algSupported: Set<String>) async throws -> ([BindingKey], [Data]) {
+	func initSecurityKeys(_ configuration: CredentialConfiguration) async throws -> ([BindingKey], [Data]) {
+		let algSupported = Set(configuration.credentialSigningAlgValuesSupported)
 		// Convert credential issuer supported algorithms to JWSAlgorithm types
 		let algTypes = algSupported.compactMap { JWSAlgorithm.AlgorithmType(rawValue: $0) }
 		guard !algTypes.isEmpty else {
@@ -77,27 +80,45 @@ public actor OpenId4VCIService {
 		}
 		// Find a compatible signing algorithm that both the secure area and credential issuer support
 		let selectedAlgorithm = try findCompatibleSigningAlgorithm(algSupported: algTypes)
-		let publicCoseKeys = try await issueReq.createKeyBatch()
-//		let unlockData = try await issueReq.secureArea.unlockKey(id: issueReq.id)
-		let bindingKeys = try publicCoseKeys.enumerated().map {
-			try createBindingKey($0.element, secureAreaSigningAlg: selectedAlgorithm, unlockData: nil, index: $0.offset)
+		guard let algType = Self.mapToJWSAlgorithmType(selectedAlgorithm) else {
+			throw PresentationSession.makeError(str: "Unsupported secure area signing algorithm: \(selectedAlgorithm)")
 		}
+		let publicCoseKeys = try await issueReq.createKeyBatch()
+		let publicKeys = try publicCoseKeys.map { try ECPublicKey(publicKey: try $0.toSecKey(), additionalParameters: ["alg": JWSAlgorithm(algType).name, "use": "sig", "kid": UUID().uuidString]) }
+		let unlockData = try await issueReq.secureArea.unlockKey(id: issueReq.id)
+		var funcKeyAttestationJWT: FuncKeyAttestationJWT? = nil
+		if config.keyAttestationsConfig != nil, configuration.supportsAttestationProofType {
+			funcKeyAttestationJWT = { nonce in try await self.getKeyAttestationJWT(publicKeys, nonce: nonce) }
+		} else if config.keyAttestationsConfig != nil, configuration.supportsJwtProofTypeWithAttestation {
+			throw PresentationSession.makeError(str: "JWT proof with attestation is not yet supported in wallet")
+		}
+		keyAttestationJwt = nil
+		let bindingKeys = try publicKeys.enumerated().map { try createBindingKey($0.element, secureAreaSigningAlg: selectedAlgorithm, unlockData: unlockData, index: $0.offset, funcKeyAttestationJWT: funcKeyAttestationJWT) }
+		keyAttestationJwt = nil
 		return (bindingKeys, publicCoseKeys.map { Data($0.toCBOR(options: CBOROptions()).encode()) })
+	}
 
+	func getKeyAttestationJWT(_ publicKeys: [ECPublicKey], nonce: String?) async throws -> KeyAttestationJWT {
+		if let keyAttestationJwt { return keyAttestationJwt }
+		let jwt = try await self.config.keyAttestationsConfig!.walletAttestationsProvider.getKeysAttestation(keys: publicKeys, nonce: nonce!)
+		keyAttestationJwt = try .init(jws: .init(compactSerialization: jwt))
+		return keyAttestationJwt!
 	}
 
 	func setConfiguration(_ config: OpenId4VciConfiguration) {
 		self.config = config
 	}
 
-	func createBindingKey(_ publicCoseKey: CoseKey, secureAreaSigningAlg: MdocDataModel18013.SigningAlgorithm, unlockData: Data?, index: Int) throws -> BindingKey {
-		let publicKey: SecKey = try publicCoseKey.toSecKey()
-		guard let algType = Self.mapToJWSAlgorithmType(secureAreaSigningAlg) else {
-			throw PresentationSession.makeError(str: "Unsupported secure area signing algorithm: \(secureAreaSigningAlg)")
-		}
-		let publicKeyJWK = try ECPublicKey(publicKey: publicKey, additionalParameters: ["alg": JWSAlgorithm(algType).name, "use": "sig", "kid": UUID().uuidString])
+	func createBindingKey(_ publicKeyJWK: ECPublicKey, secureAreaSigningAlg: MdocDataModel18013.SigningAlgorithm, unlockData: Data?, index: Int, funcKeyAttestationJWT: FuncKeyAttestationJWT?) throws -> BindingKey {
+		let algType = Self.mapToJWSAlgorithmType(secureAreaSigningAlg)!
 		let signer = try SecureAreaSigner(secureArea: issueReq.secureArea, id: issueReq.id, index: index, ecAlgorithm: secureAreaSigningAlg, unlockData: unlockData)
-		let bindingKey: BindingKey = .jwk(algorithm: JWSAlgorithm(algType), jwk: publicKeyJWK, privateKey: .custom(signer), issuer: config.client.id)
+		let bindingKey: BindingKey
+		if funcKeyAttestationJWT == nil {
+			bindingKey = .jwt(algorithm: JWSAlgorithm(algType), jwk: publicKeyJWK, privateKey: .custom(signer), issuer: config.clientId)
+		} else {
+			//bindingKey = try! .jwtKeyAttestation(algorithm: JWSAlgorithm(algType), keyAttestationJWT: funcKeyAttestationJWT!, keyIndex: UInt(index), privateKey: .custom(signer), issuer: config.clientId)
+			bindingKey = .attestation(keyAttestationJWT: funcKeyAttestationJWT!)
+		}
 		return bindingKey
 	}
 
@@ -130,9 +151,9 @@ public actor OpenId4VCIService {
 	///   - docTypeIdentifier: the document type identifier specifying the type of document to be issued
 	///   - promptMessage: optional message to prompt the user during issuance
 	/// - Returns: The data of the document
-	func issueDocument(docTypeIdentifier: DocTypeIdentifier, promptMessage: String? = nil, clientAttestation: ClientAttestation) async throws -> (IssuanceOutcome, DocDataFormat) {
+	func issueDocument(docTypeIdentifier: DocTypeIdentifier, promptMessage: String? = nil) async throws -> (IssuanceOutcome, DocDataFormat) {
 		logger.log(level: .info, "Issuing document with identifier: \(docTypeIdentifier.value)")
-		let res = try await issueByDocType(docTypeIdentifier, promptMessage: promptMessage, clientAttestation: clientAttestation)
+		let res = try await issueByDocType(docTypeIdentifier, promptMessage: promptMessage)
 		return res
 	}
 
@@ -175,7 +196,8 @@ public actor OpenId4VCIService {
 		if config.useDpopIfSupported {
 			dpopConstructor = try await config.makeDPoPConstructor(keyId: issueReq.dpopKeyId, algorithms: offer.authorizationServerMetadata.dpopSigningAlgValuesSupported)
 		}
-		return try Issuer(authorizationServerMetadata: offer.authorizationServerMetadata, issuerMetadata: offer.credentialIssuerMetadata, config: config.toOpenId4VCIConfig(), parPoster: Poster(session: networking), tokenPoster: Poster(session: networking), requesterPoster: Poster(session: networking), deferredRequesterPoster: Poster(session: networking), notificationPoster: Poster(session: networking), noncePoster: Poster(session: networking), dpopConstructor: dpopConstructor)
+		let vciConfig = try await config.toOpenId4VCIConfig(credentialIssuerId: offer.credentialIssuerIdentifier.url.absoluteString, clientAttestationPopSigningAlgValuesSupported: offer.authorizationServerMetadata.clientAttestationPopSigningAlgValuesSupported)
+		return try Issuer(authorizationServerMetadata: offer.authorizationServerMetadata, issuerMetadata: offer.credentialIssuerMetadata, config: vciConfig, parPoster: Poster(session: networking), tokenPoster: Poster(session: networking), requesterPoster: Poster(session: networking), deferredRequesterPoster: Poster(session: networking), notificationPoster: Poster(session: networking), noncePoster: Poster(session: networking), dpopConstructor: dpopConstructor)
 	}
 
 	public func getIssuerMetadata() async throws -> CredentialIssuerMetadata {
@@ -188,15 +210,16 @@ public actor OpenId4VCIService {
 		}
 	}
 
-	func getIssuerForDeferred(data: DeferredIssuanceModel) throws -> Issuer {
-		try Issuer.createDeferredIssuer(deferredCredentialEndpoint: data.deferredCredentialEndpoint, deferredRequesterPoster: Poster(session: networking), config: config.toOpenId4VCIConfig())
+	func getIssuerForDeferred(data: DeferredIssuanceModel) async throws -> Issuer {
+		let vciConfig = try await config.toOpenId4VCIConfig(credentialIssuerId: data.configuration.credentialIssuerIdentifier, clientAttestationPopSigningAlgValuesSupported: data.configuration.clientAttestationPopSigningAlgValuesSupported?.map { JWSAlgorithm(name: $0) }.compactMap { $0 })
+		return try Issuer.createDeferredIssuer(deferredCredentialEndpoint: data.deferredCredentialEndpoint, deferredRequesterPoster: Poster(session: networking), config: vciConfig)
 	}
 
-	func authorizeOffer(offerUri: String, docTypeModels: [OfferedDocModel], txCodeValue: String?, clientAttestation: ClientAttestation) async throws -> (AuthorizeRequestOutcome, Issuer, [CredentialConfiguration]) {
+	func authorizeOffer(offerUri: String, docTypeModels: [OfferedDocModel], txCodeValue: String?) async throws -> (AuthorizeRequestOutcome, Issuer, [CredentialConfiguration]) {
 		guard let offer = Self.credentialOfferCache[offerUri] else {
 			throw PresentationSession.makeError(str: "offerUri \(offerUri) not resolved. resolveOfferDocTypes must be called first")
 		}
-		let credentialInfos = docTypeModels.compactMap { try? getCredentialConfiguration(credentialIssuerIdentifier: offer.credentialIssuerIdentifier.url.absoluteString.replacingOccurrences(of: "https://", with: ""), issuerDisplay: offer.credentialIssuerMetadata.display, credentialsSupported: offer.credentialIssuerMetadata.credentialsSupported, identifier: $0.credentialConfigurationIdentifier, docType: $0.vct, vct: $0.vct, batchCredentialIssuance: offer.credentialIssuerMetadata.batchCredentialIssuance) }
+		let credentialInfos = docTypeModels.compactMap { try? getCredentialConfiguration(credentialIssuerIdentifier: offer.credentialIssuerIdentifier.url.absoluteString.replacingOccurrences(of: "https://", with: ""), issuerDisplay: offer.credentialIssuerMetadata.display, credentialsSupported: offer.credentialIssuerMetadata.credentialsSupported, identifier: $0.credentialConfigurationIdentifier, docType: $0.vct, vct: $0.vct, batchCredentialIssuance: offer.credentialIssuerMetadata.batchCredentialIssuance, dpopSigningAlgValuesSupported: offer.authorizationServerMetadata.dpopSigningAlgValuesSupported?.map(\.name), clientAttestationPopSigningAlgValuesSupported: offer.authorizationServerMetadata.clientAttestationPopSigningAlgValuesSupported?.map(\.name)) }
 		guard credentialInfos.count > 0, credentialInfos.count == docTypeModels.count else {
 			throw PresentationSession.makeError(str: "Missing Credential identifiers - expected: \(docTypeModels.count), found: \(credentialInfos.count)")
 		}
@@ -207,7 +230,8 @@ public actor OpenId4VCIService {
 		if preAuthorizedCode != nil && txCodeSpec != nil && txCodeValue == nil {
 			throw PresentationSession.makeError(str: "A transaction code is required for this offer")
 		}
-		let authorizedOutcome = if let preAuthorizedCode, let authCode = try? IssuanceAuthorization(preAuthorizationCode: preAuthorizedCode, txCode: txCodeSpec) { AuthorizeRequestOutcome.authorized(try await issuer.authorizeWithPreAuthorizationCode(credentialOffer: offer, authorizationCode: authCode, client: config.client, transactionCode: txCodeValue).get()) } else { try await authorizeRequestWithAuthCodeUseCase(issuer: issuer, offer: offer, clientAttestation: clientAttestation) }
+		let vciConfig = try await config.toOpenId4VCIConfig(credentialIssuerId: offer.credentialIssuerIdentifier.url.absoluteString, clientAttestationPopSigningAlgValuesSupported: offer.authorizationServerMetadata.clientAttestationPopSigningAlgValuesSupported)
+		let authorizedOutcome = if let preAuthorizedCode, let authCode = try? IssuanceAuthorization(preAuthorizationCode: preAuthorizedCode, txCode: txCodeSpec) { AuthorizeRequestOutcome.authorized(try await issuer.authorizeWithPreAuthorizationCode(credentialOffer: offer, authorizationCode: authCode, client: vciConfig.client, transactionCode: txCodeValue).get()) } else { try await authorizeRequestWithAuthCodeUseCase(issuer: issuer, offer: offer) }
 		return (authorizedOutcome, issuer, credentialInfos)
 	}
 
@@ -224,7 +248,6 @@ public actor OpenId4VCIService {
 		do {
 			let id = configuration.configurationIdentifier.value; let sc = configuration.scope; let dn = configuration.display.getName(uiCulture) ?? ""
 			logger.info("Starting issuing with identifer \(id), scope \(sc ?? ""), displayName: \(dn)")
-			//let issuer = try getIssuer(offer: offer)
 			let res = try await submissionUseCase(authorized, issuer: issuer, configuration: configuration, bindingKeys: bindingKeys, publicKeys: publicKeys)
 			// logger.info("Credential str:\n\(str)")
 			return res
@@ -234,7 +257,6 @@ public actor OpenId4VCIService {
 			return nil
 		}
 	}
-
 
 	static func makeMetadataResolver(_ networking: any Networking) -> CredentialIssuerMetadataResolver {
 	 CredentialIssuerMetadataResolver(fetcher: MetadataFetcher(rawFetcher: RawDataFetcher(session: networking), processor: MetadataProcessor()))
@@ -256,7 +278,6 @@ public actor OpenId4VCIService {
 			throw PresentationSession.makeError(str: "Failed to resolve issuer metadata: \(error.localizedDescription)")
 		}
 	}
-
 
 	func validateCredentialOptions(docTypeIdentifier: DocTypeIdentifier, credentialOptions: CredentialOptions?, offer: CredentialOffer? = nil) async throws -> CredentialOptions {
 		let defaultCredentialOptions: CredentialOptions
@@ -285,23 +306,24 @@ public actor OpenId4VCIService {
 	///   - keyOptions: Key options (secure area name and other options) for the document issuing (optional)
 	///   - promptMessage: Prompt message for biometric authentication (optional)
 	/// - Returns: The document issued. It is saved in storage.
-	@discardableResult public func issueDocument(docTypeIdentifier: DocTypeIdentifier, credentialOptions: CredentialOptions?, keyOptions: KeyOptions? = nil, promptMessage: String? = nil, clientAttestation: ClientAttestation) async throws -> WalletStorage.Document {
+	@discardableResult public func issueDocument(docTypeIdentifier: DocTypeIdentifier, credentialOptions: CredentialOptions?, keyOptions: KeyOptions? = nil, promptMessage: String? = nil) async throws -> WalletStorage.Document {
 		let usedKeyOptions = try await validateCredentialOptions(docTypeIdentifier: docTypeIdentifier, credentialOptions: credentialOptions)
-		try await prepareIssuing(id: UUID().uuidString, docTypeIdentifier: docTypeIdentifier, displayName: nil, credentialOptions: usedKeyOptions, keyOptions: keyOptions, disablePrompt: true, promptMessage: promptMessage)
-		let data = try await issueDocument(docTypeIdentifier: docTypeIdentifier, promptMessage: promptMessage, clientAttestation: clientAttestation)
+		try await prepareIssuing(id: UUID().uuidString, docTypeIdentifier: docTypeIdentifier, displayName: nil, credentialOptions: usedKeyOptions, keyOptions: keyOptions, disablePrompt: false, promptMessage: promptMessage)
+		let data = try await issueDocument(docTypeIdentifier: docTypeIdentifier, promptMessage: promptMessage)
 		return try await finalizeIssuing(issueOutcome: data.0, docType: docTypeIdentifier.docType, format: data.1, issueReq: issueReq)
 	}
 
-	func issueByDocType(_ docTypeIdentifier: DocTypeIdentifier, promptMessage: String? = nil, clientAttestation: ClientAttestation) async throws -> (IssuanceOutcome, DocDataFormat) {
+	func issueByDocType(_ docTypeIdentifier: DocTypeIdentifier, promptMessage: String? = nil) async throws -> (IssuanceOutcome, DocDataFormat) {
 		let (credentialIssuerIdentifier, metaData) = try await getIssuerMetadata()
 		if let authorizationServer = metaData.authorizationServers?.first {
 			let authServerMetadata = await AuthorizationServerMetadataResolver(oidcFetcher: Fetcher<OIDCProviderMetadata>(session: networking), oauthFetcher: Fetcher<AuthorizationServerMetadata>(session: networking)).resolve(url: authorizationServer)
-			let configuration = try getCredentialConfiguration(credentialIssuerIdentifier: credentialIssuerIdentifier.url.absoluteString.replacingOccurrences(of: "https://", with: ""), issuerDisplay: metaData.display, credentialsSupported: metaData.credentialsSupported, identifier: docTypeIdentifier.configurationIdentifier, docType: docTypeIdentifier.docType, vct: docTypeIdentifier.vct, batchCredentialIssuance: metaData.batchCredentialIssuance)
-			let (bindingKeys, publicKeys) = try await initSecurityKeys(algSupported: Set(configuration.credentialSigningAlgValuesSupported))
-			let offer = try CredentialOffer(credentialIssuerIdentifier: credentialIssuerIdentifier, credentialIssuerMetadata: metaData, credentialConfigurationIdentifiers: [configuration.configurationIdentifier], grants: nil, authorizationServerMetadata: try authServerMetadata.get())
+			let authorizationServerMetadata = try authServerMetadata.get()
+			let configuration = try getCredentialConfiguration(credentialIssuerIdentifier: credentialIssuerIdentifier.url.absoluteString.replacingOccurrences(of: "https://", with: ""), issuerDisplay: metaData.display, credentialsSupported: metaData.credentialsSupported, identifier: docTypeIdentifier.configurationIdentifier, docType: docTypeIdentifier.docType, vct: docTypeIdentifier.vct, batchCredentialIssuance: metaData.batchCredentialIssuance, dpopSigningAlgValuesSupported: authorizationServerMetadata.dpopSigningAlgValuesSupported?.map(\.name), clientAttestationPopSigningAlgValuesSupported: authorizationServerMetadata.clientAttestationPopSigningAlgValuesSupported?.map(\.name))
+			let (bindingKeys, publicKeys) = try await initSecurityKeys(configuration)
+			let offer = try CredentialOffer(credentialIssuerIdentifier: credentialIssuerIdentifier, credentialIssuerMetadata: metaData, credentialConfigurationIdentifiers: [configuration.configurationIdentifier], grants: nil, authorizationServerMetadata: authorizationServerMetadata)
 			// Authorize with auth code flow
 			let issuer = try await getIssuer(offer: offer)
-			let authorizedOutcome = try await authorizeRequestWithAuthCodeUseCase(issuer: issuer, offer: offer, clientAttestation: clientAttestation)
+			let authorizedOutcome = try await authorizeRequestWithAuthCodeUseCase(issuer: issuer, offer: offer)
 			if case .presentation_request(let url) = authorizedOutcome, let authRequested {
 				logger.info("Dynamic issuance request with url: \(url)")
 				let uuid = UUID().uuidString
@@ -326,7 +348,7 @@ public actor OpenId4VCIService {
 	///   - txCodeValue: Transaction code given to user (if available)
 	///   - promptMessage: prompt message for biometric authentication (optional)
 	/// - Returns: Array of issued and stored documents
-	public func issueDocumentsByOfferUrl(offerUri: String, docTypes: [OfferedDocModel], txCodeValue: String? = nil, promptMessage: String? = nil, clientAttestation: ClientAttestation) async throws -> [WalletStorage.Document] {
+	public func issueDocumentsByOfferUrl(offerUri: String, docTypes: [OfferedDocModel], txCodeValue: String? = nil, promptMessage: String? = nil) async throws -> [WalletStorage.Document] {
 		if docTypes.isEmpty { return [] }
 		guard let offer = Self.credentialOfferCache[offerUri] else {
 			throw PresentationSession.makeError(str: "Offer URI not resolved: \(offerUri)")
@@ -340,22 +362,32 @@ public actor OpenId4VCIService {
 			try await svc.prepareIssuing(id: UUID().uuidString, docTypeIdentifier: docTypeIdentifier, displayName: i > 0 ? nil : docTypes.map(\.displayName).joined(separator: ", "), credentialOptions: usedCredentialOptions, keyOptions: docTypeModel.keyOptions, disablePrompt: i > 0, promptMessage: promptMessage)
 			openId4VCIServices.append(svc)
 		}
-		let (auth, issuer, credentialInfos) = try await openId4VCIServices.first!.authorizeOffer(offerUri: offerUri, docTypeModels: docTypes, txCodeValue: txCodeValue, clientAttestation: clientAttestation)
+		let (auth, issuer, credentialInfos) = try await openId4VCIServices.first!.authorizeOffer(offerUri: offerUri, docTypeModels: docTypes, txCodeValue: txCodeValue)
 		for (i, openId4VCIService) in openId4VCIServices.enumerated() {
-			let (bindingKeys, publicKeys) = try await openId4VCIService.initSecurityKeys(algSupported: Set(credentialInfos[i].credentialSigningAlgValuesSupported))
+			let (bindingKeys, publicKeys) = try await openId4VCIService.initSecurityKeys(credentialInfos[i])
 			guard let docData = try await openId4VCIService.issueDocumentByOfferUrl(issuer: issuer, offer: offer, authorizedOutcome: auth, configuration: credentialInfos[i], bindingKeys: bindingKeys, publicKeys: publicKeys, promptMessage: promptMessage) else { continue }
 			documents.append(try await finalizeIssuing(issueOutcome: docData, docType: docTypes[i].docTypeOrVct, format: credentialInfos[i].format, issueReq: openId4VCIService.issueReq))
 		}
 		return documents
 	}
 
-	func getCredentialConfiguration(credentialIssuerIdentifier: String, issuerDisplay: [Display], credentialsSupported: [CredentialConfigurationIdentifier: CredentialSupported], identifier: String?, docType: String?, vct: String?, batchCredentialIssuance: BatchCredentialIssuance?) throws -> CredentialConfiguration {
+	func getCredentialConfiguration(credentialIssuerIdentifier: String, issuerDisplay: [Display], credentialsSupported: [CredentialConfigurationIdentifier: CredentialSupported], identifier: String?, docType: String?, vct: String?, batchCredentialIssuance: BatchCredentialIssuance?, dpopSigningAlgValuesSupported: [String]?, clientAttestationPopSigningAlgValuesSupported: [String]?) throws -> CredentialConfiguration {
 			if let credential = credentialsSupported.first(where: { if case .msoMdoc(let msoMdocCred) = $0.value, docType != nil || identifier != nil, msoMdocCred.docType == docType || docType == nil, $0.key.value == identifier || identifier == nil { true } else { false } }), case let .msoMdoc(msoMdocConf) = credential.value, let scope = msoMdocConf.scope {
 			logger.info("msoMdoc with scope \(scope), cryptographic suites: \(msoMdocConf.credentialSigningAlgValuesSupported)")
-			return CredentialConfiguration(configurationIdentifier: credential.key, credentialIssuerIdentifier: credentialIssuerIdentifier, docType: msoMdocConf.docType, vct: nil, scope: scope, credentialSigningAlgValuesSupported: msoMdocConf.proofTypesSupported?["jwt"]?.algorithms ?? [], issuerDisplay: issuerDisplay.map(\.displayMetadata), display: msoMdocConf.credentialMetadata?.display.map(\.displayMetadata) ?? [], claims: msoMdocConf.credentialMetadata?.claims ?? [], format: .cbor, defaultCredentialOptions: getDefaultCredentialOptions(batchCredentialIssuance: batchCredentialIssuance))
+			let jwtProofType = msoMdocConf.proofTypesSupported?["jwt"]
+			let attestProofType = msoMdocConf.proofTypesSupported?["attestation"]
+			let supportsJwtProofTypeWithoutAttestation = jwtProofType != nil && (jwtProofType?.keyAttestationRequirement == nil || jwtProofType?.keyAttestationRequirement == .notRequired)
+			let supportsJwtProofTypeWithAttestation = jwtProofType != nil && !supportsJwtProofTypeWithoutAttestation
+
+			return CredentialConfiguration(configurationIdentifier: credential.key, credentialIssuerIdentifier: credentialIssuerIdentifier, docType: msoMdocConf.docType, vct: nil, scope: scope, supportsAttestationProofType: attestProofType != nil, supportsJwtProofTypeWithAttestation: supportsJwtProofTypeWithAttestation,   supportsJwtProofTypeWithoutAttestation: supportsJwtProofTypeWithoutAttestation, credentialSigningAlgValuesSupported: jwtProofType?.algorithms ?? [],  dpopSigningAlgValuesSupported: dpopSigningAlgValuesSupported, clientAttestationPopSigningAlgValuesSupported: clientAttestationPopSigningAlgValuesSupported, issuerDisplay: issuerDisplay.map(\.displayMetadata), display: msoMdocConf.credentialMetadata?.display.map(\.displayMetadata) ?? [], claims: msoMdocConf.credentialMetadata?.claims ?? [], format: .cbor, defaultCredentialOptions: getDefaultCredentialOptions(batchCredentialIssuance: batchCredentialIssuance))
 		} else if let credential =  credentialsSupported.first(where: { if case .sdJwtVc(let sdJwtVc) = $0.value, vct != nil || identifier != nil, sdJwtVc.vct == vct || vct == nil, $0.key.value == identifier || identifier == nil { true } else { false } }), case let .sdJwtVc(sdJwtVc) = credential.value, let scope = sdJwtVc.scope {
 			logger.info("sdJwtVc with scope \(scope), cryptographic suites: \(sdJwtVc.credentialSigningAlgValuesSupported)")
-			return CredentialConfiguration(configurationIdentifier: credential.key, credentialIssuerIdentifier: credentialIssuerIdentifier, docType: nil, vct: sdJwtVc.vct, scope: scope, credentialSigningAlgValuesSupported: sdJwtVc.proofTypesSupported?["jwt"]?.algorithms ?? [], issuerDisplay: issuerDisplay.map(\.displayMetadata), display: sdJwtVc.credentialMetadata?.display.map(\.displayMetadata) ?? [], claims: sdJwtVc.credentialMetadata?.claims ?? [], format: .sdjwt, defaultCredentialOptions: getDefaultCredentialOptions(batchCredentialIssuance: batchCredentialIssuance))
+			let jwtProofType = sdJwtVc.proofTypesSupported?["jwt"]
+			let attestProofType = sdJwtVc.proofTypesSupported?["attestation"]
+			let supportsJwtProofTypeWithoutAttestation = jwtProofType != nil && (jwtProofType?.keyAttestationRequirement == nil || jwtProofType?.keyAttestationRequirement == .notRequired)
+			let supportsJwtProofTypeWithAttestation = jwtProofType != nil && !supportsJwtProofTypeWithoutAttestation
+
+			return CredentialConfiguration(configurationIdentifier: credential.key, credentialIssuerIdentifier: credentialIssuerIdentifier, docType: nil, vct: sdJwtVc.vct, scope: scope,  supportsAttestationProofType: attestProofType != nil, supportsJwtProofTypeWithAttestation: supportsJwtProofTypeWithAttestation,  supportsJwtProofTypeWithoutAttestation: supportsJwtProofTypeWithoutAttestation, credentialSigningAlgValuesSupported: jwtProofType?.algorithms ?? [], dpopSigningAlgValuesSupported: dpopSigningAlgValuesSupported, clientAttestationPopSigningAlgValuesSupported: clientAttestationPopSigningAlgValuesSupported, issuerDisplay: issuerDisplay.map(\.displayMetadata), display: sdJwtVc.credentialMetadata?.display.map(\.displayMetadata) ?? [], claims: sdJwtVc.credentialMetadata?.claims ?? [], format: .sdjwt, defaultCredentialOptions: getDefaultCredentialOptions(batchCredentialIssuance: batchCredentialIssuance))
 		}
 		logger.error("No credential for \(docType ?? vct ?? identifier ?? ""). Currently supported credentials: \(credentialsSupported.keys)")
 		throw WalletError(description: "Issuer does not support docType or scope or identifier \(docType ?? vct ?? identifier ?? "")")
@@ -369,7 +401,7 @@ public actor OpenId4VCIService {
 			return credentialInfos
 	}
 
-	private func authorizeRequestWithAuthCodeUseCase(issuer: Issuer, offer: CredentialOffer, clientAttestation: ClientAttestation) async throws -> AuthorizeRequestOutcome {
+	private func authorizeRequestWithAuthCodeUseCase(issuer: Issuer, offer: CredentialOffer) async throws -> AuthorizeRequestOutcome {
 		let pushedAuthorizationRequestEndpoint = if case let .oidc(metaData) = offer.authorizationServerMetadata, let endpoint = metaData.pushedAuthorizationRequestEndpoint { endpoint } else if case let .oauth(metaData) = offer.authorizationServerMetadata, let endpoint = metaData.pushedAuthorizationRequestEndpoint { endpoint } else { "" }
 		if config.usePAR && pushedAuthorizationRequestEndpoint.isEmpty { logger.info("PAR not supported, Pushed Authorization Request Endpoint is nil") }
 		logger.info("--> [AUTHORIZATION] Placing Request to AS server's endpoint \(pushedAuthorizationRequestEndpoint)")
@@ -443,7 +475,6 @@ public actor OpenId4VCIService {
 		}
 	}
 
-
 	private func handleCredentialResponse(credentials: [Credential], publicKeys: [Data], format: String?, configuration: CredentialConfiguration) async throws -> IssuanceOutcome {
 		logger.info("Credential issued with format \(format ?? "unknown")")
 		let toData: (String) -> Data = { str in
@@ -467,7 +498,7 @@ public actor OpenId4VCIService {
 		} else {
 			throw PresentationSession.makeError(str: "Invalid credential")
 		} }
-//		if config.dpopKeyOptions != nil { try? await issueReq.secureArea.deleteKeyBatch(id: issueReq.dpopKeyId, startIndex: 0, batchSize: 1); try? await issueReq.secureArea.deleteKeyInfo(id: issueReq.dpopKeyId) }
+		if config.dpopKeyOptions != nil { try? await issueReq.secureArea.deleteKeyBatch(id: issueReq.dpopKeyId, startIndex: 0, batchSize: 1); try? await issueReq.secureArea.deleteKeyInfo(id: issueReq.dpopKeyId) }
 		return .issued(credData, configuration)
 	}
 
@@ -489,7 +520,7 @@ public actor OpenId4VCIService {
 
 	func requestDeferredIssuance(deferredDoc: WalletStorage.Document) async throws -> IssuanceOutcome {
 		let model = try JSONDecoder().decode(DeferredIssuanceModel.self, from: deferredDoc.data)
-		let issuer = try getIssuerForDeferred(data: model)
+		let issuer = try await getIssuerForDeferred(data: model)
 		let authorized = AuthorizedRequest(accessToken: model.accessToken, refreshToken: model.refreshToken, credentialIdentifiers: nil, timeStamp: model.timeStamp, dPopNonce: nil)
 		return try await deferredCredentialUseCase(issuer: issuer, authorized: authorized, transactionId: model.transactionId, publicKeys: model.publicKeys, derKeyData: model.derKeyData, configuration: model.configuration)
 	}
@@ -533,7 +564,7 @@ public actor OpenId4VCIService {
 		logger.info("Starting issuing with identifer \(model.configuration.configurationIdentifier.value)")
 		let pkceVerifier = try PKCEVerifier(codeVerifier: model.pckeCodeVerifier, codeVerifierMethod: model.pckeCodeVerifierMethod)
 		let authorized = try await issuer.authorizeWithAuthorizationCode(request: .authorizationCode(AuthorizationCodeRetrieved(credentials: [.init(value: model.configuration.configurationIdentifier.value)], authorizationCode: IssuanceAuthorization(authorizationCode: authorizationCode), pkceVerifier: pkceVerifier, configurationIds: [model.configuration.configurationIdentifier], dpopNonce: nil))).get()
-		let (bindingKeys, publicKeys) = try await initSecurityKeys(algSupported: Set(model.configuration.credentialSigningAlgValuesSupported))
+		let (bindingKeys, publicKeys) = try await initSecurityKeys(model.configuration)
 		let res = try await submissionUseCase(authorized, issuer: issuer, configuration: model.configuration, bindingKeys: bindingKeys, publicKeys: publicKeys)
 		return res
 	}
@@ -670,7 +701,7 @@ public actor OpenId4VCIService {
 		let pds = issueOutcome.pendingOrDeferredStatus
 		var batch: [WalletStorage.Document]?
 		var publicKeys: [Data] = []
-		var dkInfo = DocKeyInfo(secureAreaName: issueReq.secureAreaName, batchSize: 5, credentialPolicy: issueReq.credentialOptions.credentialPolicy)
+		var dkInfo = DocKeyInfo(secureAreaName: issueReq.secureAreaName, batchSize: 0, credentialPolicy: issueReq.credentialOptions.credentialPolicy)
 		switch issueOutcome {
 		case .issued(let dataPair, let cc):
 			guard dataPair.first != nil else { throw PresentationSession.makeError(str: "Empty issued data array") }
@@ -698,7 +729,7 @@ public actor OpenId4VCIService {
 		let newDocStatus: WalletStorage.DocumentStatus = issueOutcome.isDeferred ? .deferred : (issueOutcome.isPending ? .pending : .issued)
 		let newDocument = WalletStorage.Document(id: issueReq.id, docType: docTypeToSave, docDataFormat: format, data: dataToSave, docKeyInfo: dkInfo.toData(), createdAt: Date(), metadata: docMetadata?.toData(), displayName: displayName, status: newDocStatus)
 		if newDocStatus == .pending { await storage.appendDocModel(newDocument, uiCulture: uiCulture); return newDocument }
-//		if newDocStatus == .issued { try await validateIssuedDocuments(newDocument, batch: batch, publicKeys: publicKeys) }
+		if newDocStatus == .issued { try await validateIssuedDocuments(newDocument, batch: batch, publicKeys: publicKeys) }
 		try await endIssueDocument(newDocument, batch: batch)
 		await storage.appendDocModel(newDocument, uiCulture: uiCulture)
 		await storage.refreshPublishedVars()

@@ -203,7 +203,7 @@ public final class EudiWallet: ObservableObject, @unchecked Sendable {
 		guard let vciService = OpenId4VCIServiceRegistry.shared.get(name: issuerName) else {
 			throw WalletError(description: "No OpenId4VCI service registered for name \(issuerName)")
 		}
-		return try await vciService.issueDocument(docTypeIdentifier: docTypeIdentifier, credentialOptions: credentialOptions, keyOptions: keyOptions, promptMessage: promptMessage, clientAttestation: clientAttestation)
+		return try await vciService.issueDocument(docTypeIdentifier: docTypeIdentifier, credentialOptions: credentialOptions, keyOptions: keyOptions, promptMessage: promptMessage)
 	}
 
 	/// Get default credential options (batch-size and credential policy) for a document type
@@ -297,7 +297,7 @@ public final class EudiWallet: ObservableObject, @unchecked Sendable {
 				throw WalletError(description: "No OpenId4VCI service registered for name \(urlString)")
 			}
 			if let configuration {	await vciService.setConfiguration(configuration) }
-			return try await vciService.issueDocumentsByOfferUrl(offerUri: offerUri, docTypes: docTypes, txCodeValue: txCodeValue, promptMessage: promptMessage, clientAttestation: clientAttestation)
+			return try await vciService.issueDocumentsByOfferUrl(offerUri: offerUri, docTypes: docTypes, txCodeValue: txCodeValue, promptMessage: promptMessage)
 		case .failure(let error):
 			throw PresentationSession.makeError(str: "Unable to resolve credential offer: \(error.localizedDescription)")
 		}

@@ -22,6 +22,7 @@ import MdocSecurity18013
 import WalletStorage
 import SwiftCBOR
 import SwiftyJSON
+import JOSESwift
 import struct eudi_lib_sdjwt_swift.ClaimPath
 import eudi_lib_sdjwt_swift
 
@@ -32,11 +33,11 @@ extension String {
 }
 
 func secCall<Result>(_ body: (_ resultPtr: UnsafeMutablePointer<Unmanaged<CFError>?>) -> Result?) throws -> Result {
-	var errorQ: Unmanaged<CFError>? = nil
-	guard let result = body(&errorQ) else {
-		throw errorQ!.takeRetainedValue() as Error
-	}
-	return result
+    var errorQ: Unmanaged<CFError>? = nil
+    guard let result = body(&errorQ) else {
+        throw errorQ!.takeRetainedValue() as Error
+    }
+    return result
 }
 
 extension Display {
@@ -54,15 +55,15 @@ extension Bundle {
 }
 
 extension Data {
-	  public init?(base64urlEncoded input: String) {
-		  var base64 = input
-		  base64 = base64.replacingOccurrences(of: "-", with: "+")
-		  base64 = base64.replacingOccurrences(of: "_", with: "/")
-		  while base64.count % 4 != 0 {
-			  base64 = base64.appending("=")
-		  }
-		  self.init(base64Encoded: base64)
-	  }
+      public init?(base64urlEncoded input: String) {
+          var base64 = input
+          base64 = base64.replacingOccurrences(of: "-", with: "+")
+          base64 = base64.replacingOccurrences(of: "_", with: "/")
+          while base64.count % 4 != 0 {
+              base64 = base64.appending("=")
+          }
+          self.init(base64Encoded: base64)
+      }
 }
 
 extension FileManager {
@@ -76,13 +77,13 @@ extension FileManager {
 }
 
 extension Encodable {
-	/// Converting object to postable JSON
-	func toJSON(_ encoder: JSONEncoder = JSONEncoder()) -> [String: Any] {
-		guard let data = try? encoder.encode(self),
-			  let object = try? JSONSerialization.jsonObject(with: data, options: .allowFragments),
-			  let json = object as? [String: Any] else { return [:] }
-		return json
-	}
+    /// Converting object to postable JSON
+    func toJSON(_ encoder: JSONEncoder = JSONEncoder()) -> [String: Any] {
+        guard let data = try? encoder.encode(self),
+              let object = try? JSONSerialization.jsonObject(with: data, options: .allowFragments),
+              let json = object as? [String: Any] else { return [:] }
+        return json
+    }
 }
 
 extension WalletStorage.Document {
@@ -259,7 +260,7 @@ extension JSON {
 			var a = [DocClaim]()
 			for (n,(key,subJson)) in enumerated() {
 				let isArray = type == .array
-				let n2 = if isArray { "" } else { key }
+				let n2 = if isArray { String(n) } else { key }
 				let cmd = claimMetadata?.convertToJsonClaimMetadata(uiCulture, keyPrefix: pathPrefix)
 				if let di = subJson.toDocClaim(n2, order: n, pathPrefix: pathPrefix, claimMetadata, uiCulture, cmd?.displayNames[key], cmd?.mandatory[key]) {
 					a.append(di)
@@ -273,9 +274,9 @@ extension JSON {
 
 
 extension SecureAreaSigner: eudi_lib_sdjwt_swift.AsyncSignerProtocol {
-	func signAsync(_ data: Data) async throws -> Data {
-		return try await sign(data)
-	}
+    func signAsync(_ data: Data) async throws -> Data {
+        return try await sign(data)
+    }
 
 }
 
@@ -292,4 +293,67 @@ extension JSON {
 			throw SDJWTVerifierError.missingOrUnknownHashingAlgorithm
 		}
 	}
+}
+
+extension IdentityAndAccessManagementMetadata {
+  public var clientAttestationPopSigningAlgValuesSupported: [JWSAlgorithm]? {
+    switch self {
+    case .oidc(let metaData):
+      return metaData.clientAttestationPopSigningAlgValuesSupported?.map { JWSAlgorithm(name: $0) }
+    case .oauth(let metaData):
+      return metaData.clientAttestationPopSigningAlgValuesSupported?.map { JWSAlgorithm(name: $0) }
+    }
+  }
+}
+
+extension ECPublicKey: @retroactive @unchecked Sendable {}
+
+
+extension BindingKey {
+
+  static func createSigner(
+    with header: JWSHeader,
+    and payload: Payload,
+    for privateKey: SigningKeyProxy,
+    and signatureAlgorithm: SignatureAlgorithm
+  ) async throws -> Signer {
+
+    if case let .secKey(secKey) = privateKey,
+       let secKeySigner = Signer(
+        signatureAlgorithm: signatureAlgorithm,
+        key: secKey
+       ) {
+      return secKeySigner
+
+    } else if case let .custom(customAsyncSigner) = privateKey {
+      let headerData = header as DataConvertible
+      let signature = try await customAsyncSigner.signAsync(
+        headerData.data(),
+        payload.data()
+      )
+
+      let customSigner = PrecomputedSigner(
+        signature: signature,
+        algorithm: signatureAlgorithm
+      )
+      return Signer(customSigner: customSigner)
+
+    } else {
+      throw ValidationError.error(reason: "Unable to create JWS signer")
+    }
+  }
+}
+
+class PrecomputedSigner: JOSESwift.SignerProtocol {
+  var algorithm: JOSESwift.SignatureAlgorithm
+  let signature: Data
+
+  init(signature: Data, algorithm: JOSESwift.SignatureAlgorithm) {
+    self.algorithm = algorithm
+    self.signature = signature
+  }
+
+  func sign(_ signingInput: Data) throws -> Data {
+    return signature
+  }
 }
