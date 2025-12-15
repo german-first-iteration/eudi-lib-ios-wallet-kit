@@ -16,28 +16,46 @@ limitations under the License.
 
 import Foundation
 import MdocDataModel18013
-@preconcurrency import OpenID4VCI
+import OpenID4VCI
 import WalletStorage
 
-struct CredentialConfiguration: Sendable, Codable {
+struct CredentialConfiguration: Codable, Sendable {
+	/// the credential issuer identifier (issuer URL)
 	let configurationIdentifier: CredentialConfigurationIdentifier
 	let credentialIssuerIdentifier: String
-	let docType: String?
-	let scope: String
-	let display: [MdocDataModel18013.DisplayMetadata]
-	let issuerDisplay: [MdocDataModel18013.DisplayMetadata]
-	let algValuesSupported: [String]
-	let msoClaims: MsoMdocClaims?
-	let flatClaims: [String: Claim]?
-	let order: [String]?
-	let format: DocDataFormat
-}
+    let docType: String?
+	let vct: String?
+    let scope: String?
+    let credentialSigningAlgValuesSupported: [String]
+	let issuerDisplay: [DisplayMetadata]    //public let proofTypesSupported: [String: ProofTypeSupportedMeta]?
+    let display: [DisplayMetadata]
+    let claims: [Claim]
+   	let format: DocDataFormat
+	var batchSize: Int?
+	let defaultCredentialOptions: CredentialOptions
+
+	public init(configurationIdentifier: CredentialConfigurationIdentifier, credentialIssuerIdentifier: String, docType: String? = nil, vct: String? = nil, scope: String? = nil, credentialSigningAlgValuesSupported: [String], issuerDisplay: [DisplayMetadata], display: [DisplayMetadata], claims: [Claim], format: DocDataFormat, defaultCredentialOptions: CredentialOptions) {
+		self.configurationIdentifier = configurationIdentifier
+		self.credentialIssuerIdentifier = credentialIssuerIdentifier
+		self.docType = docType
+		self.vct = vct
+		self.scope = scope
+		self.credentialSigningAlgValuesSupported = credentialSigningAlgValuesSupported
+		self.issuerDisplay = issuerDisplay
+		self.display = display
+		self.claims = claims
+		self.format = format
+		self.defaultCredentialOptions = defaultCredentialOptions
+	}
+ }
 
 struct DeferredIssuanceModel: Codable, Sendable {
 	let deferredCredentialEndpoint: CredentialIssuerEndpoint
 	let accessToken: IssuanceAccessToken
 	let refreshToken: IssuanceRefreshToken?
 	let transactionId: TransactionId
+	let publicKeys: [Data]
+	let derKeyData: Data?
 	let configuration: CredentialConfiguration
 	let timeStamp: TimeInterval
 }
@@ -55,7 +73,7 @@ struct PendingIssuanceModel: Codable {
 }
 
 enum IssuanceOutcome {
-	case issued(Data?, String?, CredentialConfiguration)
+	case issued([(data: Data, pk: Data)], CredentialConfiguration)
 	case deferred(DeferredIssuanceModel)
 	case pending(PendingIssuanceModel)
 }
@@ -79,6 +97,18 @@ extension IssuanceOutcome {
 		case .pending(_): .pending
 		default: nil
 		}
+	}
+
+	func getDataToSave(index: Int, format: DocDataFormat) -> Data {
+		guard case let .issued(dataPairs, _) = self, dataPairs.count > index else { return Data() }
+		let (data, _) = dataPairs[index]
+		return data
+	}
+
+	func getPublicKey(index: Int) -> Data {
+		guard case let .issued(dataPairs, _) = self, dataPairs.count > index else { return Data() }
+		let (_, pk) = dataPairs[index]
+		return pk
 	}
 }
 
