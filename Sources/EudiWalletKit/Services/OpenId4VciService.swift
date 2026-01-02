@@ -113,7 +113,9 @@ public actor OpenId4VCIService {
 			bindingKey = .jwt(algorithm: JWSAlgorithm(algType), jwk: publicKeyJWK, privateKey: .custom(signer), issuer: config.clientId)
 		} else {
 			//bindingKey = try! .jwtKeyAttestation(algorithm: JWSAlgorithm(algType), keyAttestationJWT: funcKeyAttestationJWT!, keyIndex: UInt(index), privateKey: .custom(signer), issuer: config.clientId)
-			bindingKey = .attestation(keyAttestationJWT: funcKeyAttestationJWT!)
+			//TODO: use funcKeyAttestationJWT for creating bindingKey when implementing key attestations: WD-2188
+			bindingKey = .jwt(algorithm: JWSAlgorithm(algType), jwk: publicKeyJWK, privateKey: .custom(signer), issuer: config.clientId)
+//			bindingKey = .attestation(keyAttestationJWT: funcKeyAttestationJWT!)
 		}
 		return bindingKey
 	}

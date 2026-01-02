@@ -14,11 +14,11 @@ import SwiftyJSON
 
 extension EudiWallet {
 	@MainActor
-	@discardableResult public func issuePAR(issuerName: String, docTypeIdentifier: DocTypeIdentifier, credentialOptions: CredentialOptions?, keyOptions: KeyOptions? = nil, promptMessage: String? = nil, dpopConstructorParam: IssuerDPoPConstructorParam, clientAttestation: ClientAttestation) async throws -> WalletStorage.Document? {
+	@discardableResult public func issuePAR(issuerName: String, docTypeIdentifier: DocTypeIdentifier, credentialOptions: CredentialOptions?, keyOptions: KeyOptions? = nil, promptMessage: String? = nil) async throws -> WalletStorage.Document? {
 		guard let vciService = OpenId4VCIServiceRegistry.shared.get(name: issuerName) else {
 			throw WalletError(description: "No OpenId4VCI service registered for name \(issuerName)")
 		}
-		return try await vciService.issuePAR(docTypeIdentifier, credentialOptions: credentialOptions, promptMessage: promptMessage, dpopConstructorParam: dpopConstructorParam, clientAttestation: clientAttestation)
+		return try await vciService.issuePAR(docTypeIdentifier, credentialOptions: credentialOptions, promptMessage: promptMessage)
 	}
 
 	@MainActor
