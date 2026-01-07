@@ -32,7 +32,9 @@ public protocol PresentationService: Sendable {
 	func startQrEngagement(secureAreaName: String?, crv: CoseEcCurve) async throws -> String
 	/// Receive request.
 	func receiveRequest() async throws -> UserRequestInfo
-	
+
+	var transactionLog: TransactionLog { get }
+
 	/// Send response to verifier
 	/// - Parameters:
 	///   - userAccepted: True if user accepted to send the response
@@ -40,4 +42,9 @@ public protocol PresentationService: Sendable {
 	func sendResponse(userAccepted: Bool, itemsToSend: RequestItems, onSuccess: ( @Sendable (URL?) -> Void)?) async throws
 }
 
+public protocol NetworkingProtocol: Sendable {
+	func data(from url: URL) async throws -> (Data, URLResponse)
+	func data(for request: URLRequest) async throws -> (Data, URLResponse)
+}
 
+extension URLSession: NetworkingProtocol {}
